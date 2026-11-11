@@ -6,7 +6,10 @@ from pathlib import Path
 W = H = 256
 px = [[(16, 18, 26)] * W for _ in range(H)]
 
+OY = 0  # vertical offset applied to the artwork (set below to centre it)
+
 def rect(x0, y0, x1, y1, c, r=0):
+    y0 += OY; y1 += OY
     for y in range(max(0, y0), min(H, y1)):
         for x in range(max(0, x0), min(W, x1)):
             if r:
@@ -17,8 +20,10 @@ def rect(x0, y0, x1, y1, c, r=0):
 def circle(cx, cy, r, c):
     rect(cx - r, cy - r, cx + r + 1, cy + r + 1, c, r)
 
-# Background tile with a red accent band
-rect(0, 0, 256, 256, (26, 29, 40), 36)
+# Square background (the console shows the icon as a square tile)
+rect(0, 0, 256, 256, (26, 29, 40))
+# Artwork spans y 28 (title) to 206 (accent band): 178 px, centred in 256.
+OY = (256 - (206 - 28)) // 2 - 28
 rect(18, 196, 238, 206, (228, 70, 59))
 # Controller body
 rect(20, 74, 236, 178, (196, 198, 204), 14)
