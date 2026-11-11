@@ -185,7 +185,7 @@
   var memoryStore = {};
 
   /* ---------------- Core ---------------- */
-  if (typeof QuickNESCore !== "function") throw Error("QuickNES runtime is missing from the package.");
+  if (typeof QuickNESCore !== "function") throw Error("The emulator runtime is missing from the package.");
   var core = await QuickNESCore({ print: record, printErr: record });
   function heap() { return core.HEAPU8; }
   var W = core._nes_width(), H = core._nes_height(), FRAME_BYTES = W * H * 4;
@@ -571,7 +571,7 @@
     return out;
   }
   // Darkening (alpha 0-255) for each screen row / column, using every screen
-  // pixel inside an NES pixel: v / u is the position across it (0..1, centre
+  // pixel inside a NES pixel: v / u is the position across it (0..1, centre
   // 0.5) and d the distance from the centre (0 centre .. ~1 edge). Graded
   // profiles (bright centre fading to the edges) instead of one hard line.
   function pos(o) { return (o.fromStart + 0.5) / o.size; }
@@ -1027,7 +1027,7 @@
     var mapper = (h[6] >> 4) | (h[7] & 0xf0);
     if ((h[7] & 0x0c) === 0x08) mapper |= (h[8] & 0x0f) << 8;  // NES 2.0
     if (SUPPORTED_MAPPERS.indexOf(mapper) < 0 || /mapper/i.test(err))
-      return "This game uses mapper " + mapper + (MAPPER_NAMES[mapper] ? " (" + MAPPER_NAMES[mapper] + ")" : "") + ", which QuickNES does not support, so it cannot run in SW2NES.";
+      return "This game uses mapper " + mapper + (MAPPER_NAMES[mapper] ? " (" + MAPPER_NAMES[mapper] + ")" : "") + ", which SW2NES does not support, so it cannot run.";
     return "This ROM could not be loaded: " + err + "\n\nThe file may be damaged or a bad dump.";
   }
   function quitGame() {
@@ -1043,7 +1043,7 @@
   }
 
   /* ---------------- Text files and automated test runs ---------------- */
-  var APP_VERSION = "1.0.0";
+  var APP_VERSION = "1.0.1";
   function ascii(text) { return text.replace(/[\u0080-\uffff]/g, function (c) { return "\\u" + ("000" + c.charCodeAt(0).toString(16)).slice(-4); }); }
   // One-time move from the app's former name: copy everything (settings, save
   // states, battery saves, cheats) from the old data folder when this app has

@@ -1,6 +1,6 @@
 # SW2NES
 
-An NES emulator for the Nintendo Switch 2, packaged as a `.civapp` for
+A NES emulator for the Nintendo Switch 2, packaged as a `.civapp` for
 [CivHomebrew](https://github.com/XITRIX/CivHomebrew). It runs the
 [QuickNES](https://github.com/libretro/QuickNES_Core) core inside
 CivHomebrew's browser engine, which runs JavaScript only (no JIT,
