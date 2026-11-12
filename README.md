@@ -9,6 +9,20 @@ JavaScript, and the hottest parts are hand-written JavaScript.
 
 No game ROMs are included or provided.
 
+The native Vulkan Launcher requires CivHomebrew SDK **1.3.0 or newer** in
+the running Launcher. SW2NES borrows that Launcher's UI view and RGBA
+framebuffer; it does not bundle or start another renderer. Menus, CRT masks
+and the optional stats graph use the native UI snapshot. Older Gameface
+Launchers and browser previews retain the original display path. Restart
+Civ VII after updating the Launcher/SDK. Native rendering and performance
+still require console qualification; the 60 fps feature below describes the
+original Gameface build.
+
+The view attachment and cleanup follow
+[Moonlight's native UI adapter](https://github.com/XITRIX/Moonlight-CivSwitch/blob/main/app/src/ui/native-ui.js).
+NES frames use the SDK's RGBA framebuffer on that same view; they do not
+need Moonlight's decoder/video pipelines or a separate display surface.
+
 ## Features
 
 - Locked 60 fps, display-synchronised presentation and integer scaling
@@ -82,6 +96,9 @@ node bench/diff.cjs dist/runtime/ref.js dist/runtime/quicknes.js 20000 path/to/r
 # UI tests in headless Chrome (browser preview and console mock)
 node bench/ui-test.mjs /tmp/shots preview.html
 node bench/ui-test.mjs /tmp/shots preview-native.html
+
+# Native UI integration (SDK release extracted separately; no game ROM needed)
+node bench/native-ui-test.cjs /path/to/extracted/civhomebrew-sdk-1.3.0
 ```
 
 The browser previews need a ROM at `bench/test.nes`, which is not included.

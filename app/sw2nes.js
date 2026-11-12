@@ -6,6 +6,14 @@
   var previous = window.__civswitchApp;
   if (previous && typeof previous.close === "function") await previous.close();
 
+  // Like Moonlight's native UI adapter, borrow the Launcher's view lease;
+  // older Launchers and browser previews keep the original Gameface path.
+  var ui = window.CivAppsNativeUI, sdk = window.CivHomebrewSDK;
+  var nativeSession = ui && (ui.sessions.current || await ui.sessions.pending);
+  var nativeView = null, nativeAttach = null, closing = null;
+  if (nativeSession && (!sdk || !sdk.app || !sdk.framebuffer))
+    throw Error("Update CivHomebrew to SDK 1.3.0 or newer and restart Civ VII before starting SW2NES.");
+
   var ROM_DIR = "save:/nes";
   var DATA_PARENT = "save:/civhomebrew/data";
   var DATA_DIR = DATA_PARENT + "/sw2nes";
@@ -34,6 +42,14 @@
   var root = node("div", document.body, { position: "fixed", left: "0", top: "0", right: "0", bottom: "0", backgroundColor: C.bg,
     color: C.text, fontFamily: "Arial, sans-serif", zIndex: "10", overflow: "hidden", outline: "none" });
   root.id = APP_ID; root.tabIndex = -1;
+  if (nativeSession) root.setAttribute("data-civ-native-ui", "1");
+  function resizeNativeRoot() {
+    if (!nativeSession) return;
+    root.style.width = window.innerWidth + "px"; root.style.height = window.innerHeight + "px";
+    if (menuPanel) menuPanel.style.maxHeight = Math.max(100, window.innerHeight * 0.9 - 52) + "px";
+    if (nativeView) nativeView.invalidate();
+  }
+  resizeNativeRoot();
 
   // ROM browser screen
   // ROM list: full-screen background with a centred window, 50% wide and as
@@ -111,8 +127,17 @@
   var stats = node("div", statsBar, { fontSize: "18px", color: "#9dfc9d", whiteSpace: "pre", fontFamily: "Courier New, monospace" }, "");
   // Frametime graph: time between displayed frames, scrolling left (newest at the right), 2 px per frame.
   var GRAPH_STEP = 2, GRAPH_FRAMES = 240, GRAPH_W = GRAPH_STEP * GRAPH_FRAMES, GRAPH_H = 40, GRAPH_MAX_MS = 33.4, graphMs = 0;  // 16.7 ms sits in the middle
-  var graph = node("canvas", statsBar, { width: GRAPH_W + "px", height: GRAPH_H + "px", marginLeft: "12px", display: "none" });
+  var graph = node(nativeSession ? "div" : "canvas", statsBar, { width: GRAPH_W + "px", height: GRAPH_H + "px", marginLeft: "12px", display: "none" });
   graph.width = GRAPH_W; graph.height = GRAPH_H;
+  // Ordinary canvas contents are not part of the native DOM snapshot. Use
+  // solid segments for the optional graph, retaining the canvas on Gameface.
+  var graphSegments = [];
+  if (nativeSession) {
+    Object.assign(graph.style, { position: "relative", overflow: "hidden", flexShrink: "0" });
+    Object.assign(statsBar.style, { flexWrap: "wrap", maxWidth: "calc(100% - 52px)" });
+    stats.style.setProperty("font-family", "CivNanoMono, monospace", "important");
+    node("div", graph, { position: "absolute", left: "0", right: "0", top: "20px", height: "1px", backgroundColor: "rgba(255,255,255,0.3)" });
+  }
   var graphCtx = null; try { graphCtx = graph.getContext("2d"); } catch (e) { graphCtx = null; }
   // Hidden scratch canvas for scrolling: copying a canvas onto itself can smear
   // on the console (overlapping copy), filling the area under the line.
@@ -122,11 +147,13 @@
   var testLabel = node("div", game, { position: "absolute", zIndex: "4", left: "50%", top: "40%", transform: "translateX(-50%)", fontSize: "44px", fontWeight: "bold", color: "#ffd84a", backgroundColor: "rgba(0,0,0,0.75)", padding: "10px 24px", borderRadius: "10px", display: "none" }, "");
   var toast = node("div", game, { position: "absolute", zIndex: "3", left: "50%", bottom: "28px", transform: "translateX(-50%)", fontSize: "20px", backgroundColor: "rgba(10,12,18,0.85)", padding: "10px 18px", borderRadius: "8px", display: "none" }, "");
   var hint = node("div", game, { position: "absolute", zIndex: "3", right: "16px", bottom: "12px", fontSize: "16px", color: "#8891a4" }, "L + R: Menu");
+  if (nativeSession) hint.style.whiteSpace = "nowrap";
 
   // Pause menu
   var menu = node("div", root, { position: "absolute", zIndex: "10", left: "0", top: "0", right: "0", bottom: "0", display: "none", backgroundColor: "rgba(0,0,0,0.6)", alignItems: "center", justifyContent: "center" });
   var menuPanel = node("div", menu, { display: "flex", flexDirection: "column", width: "460px", padding: "26px", backgroundColor: C.panel, border: "1px solid " + C.line, borderRadius: "14px" });
   var menuTitle = node("div", menuPanel, { fontSize: "26px", fontWeight: "bold", marginBottom: "14px", overflow: "hidden", whiteSpace: "nowrap" }, "Paused");
+  if (nativeSession) { menuPanel.style.overflowY = "auto"; menuTitle.style.flexShrink = "0"; resizeNativeRoot(); }
   var menuItems = [];
 
   // Message screen
@@ -160,6 +187,7 @@
     return bits;
   }
   function listen(target, name, fn) { target.addEventListener(name, fn, true); removers.push(function () { target.removeEventListener(name, fn, true); }); }
+  listen(window, "resize", resizeNativeRoot);
   function consume(e) { if (e.preventDefault) e.preventDefault(); if (e.stopImmediatePropagation) e.stopImmediatePropagation(); }
   // Keep the game's own UI from reacting while SW2NES is open.
   listen(window, "navigate-input", consume);
@@ -356,12 +384,15 @@
   // "< value >" selector drawn with CSS triangles (the console font lacks arrow glyphs).
   function valueBox(parent, style) {
     var box = node("div", parent, Object.assign({ display: "none", flexDirection: "row", alignItems: "center", whiteSpace: "nowrap", marginLeft: "16px" }, style || {}));
-    var tri = function (left) { return node("div", box, { width: "0", height: "0", borderTop: "8px solid transparent", borderBottom: "8px solid transparent",
-      borderLeft: left ? "0" : "11px solid " + C.dim, borderRight: left ? "11px solid " + C.dim : "0" }); };
+    var tri = function (left) {
+      if (nativeSession) return node("div", box, { color: C.dim }, left ? "<" : ">");
+      return node("div", box, { width: "0", height: "0", borderTop: "8px solid transparent", borderBottom: "8px solid transparent",
+        borderLeft: left ? "0" : "11px solid " + C.dim, borderRight: left ? "11px solid " + C.dim : "0" }); };
     var l = tri(true), text = node("div", box, { margin: "0 10px" }, ""), r = tri(false);
     return { box: box, set: function (t, active) {
       box.style.display = t === null ? "none" : "flex"; if (t === null) return;
       text.textContent = t; var c = active ? C.text : C.dim; text.style.color = c; l.style.borderRightColor = c; r.style.borderLeftColor = c;
+      if (nativeSession) l.style.color = r.style.color = c;
     } };
   }
   function settingChoices(i) { return SETTINGS_ITEMS[i][1] || crtChoiceNames(); }
@@ -472,7 +503,7 @@
   // Display path: "texture" = native live texture (uploaded by the engine's
   // renderer); "canvas" = 2D canvas putImageData (drawn in the UI's own frame).
   function openVideo() {
-    if (N && (displayMode === "texture" || !canvasPixelsOk())) {
+    if (!nativeView && N && (displayMode === "texture" || !canvasPixelsOk())) {
       core._nes_set_format16(videoFormat === 85 ? 1 : videoFormat === 86 ? 2 : 0);
       texture = N.texture(W, H, videoFormat, videoBuffers);
       liveImage.style.display = "block"; if (canvasWrap) canvasWrap.style.display = "none";
@@ -482,7 +513,17 @@
     if (!canvas) {
       canvasWrap = node("div", game, { position: "absolute", zIndex: "1", overflow: "hidden" });
       canvas = node("canvas", canvasWrap, { position: "absolute", left: "0", top: "0", imageRendering: "pixelated" });
-      canvas.width = W; canvas.height = H; ctx2d = canvas.getContext("2d"); imageData = ctx2d.createImageData(W, H);
+      canvas.width = W; canvas.height = H;
+      if (!nativeView) { ctx2d = canvas.getContext("2d"); imageData = ctx2d.createImageData(W, H); }
+    }
+    if (nativeView) {
+      videoFormat = 28;
+      var frame = sdk.framebuffer.create({ session: nativeSession, view: nativeView, canvas: canvas, width: W, height: H });
+      texture = { format: 28, close: frame.close, present: function (bytes, ptr) {
+        if (!Number.isInteger(ptr) || ptr < 0 || ptr + FRAME_BYTES > bytes.length) throw Error("Video framebuffer range rejected.");
+        frame.present(bytes.subarray(ptr, ptr + FRAME_BYTES));
+        return null;
+      } };
     }
     canvasWrap.style.display = "block"; liveImage.style.display = "none"; fitPicture();
   }
@@ -501,6 +542,7 @@
     openVideo(); core._nes_reconvert(); present();
   }
   function reopenVideo() {
+    if (nativeView) { switchDisplay(displayMode); return; }
     if (!N || !texture) return;
     try { texture.close(); } catch (e) { record("Texture close: " + e.message); }
     texture = N.texture(W, H, videoFormat, videoBuffers); shownUrl = "";
@@ -618,6 +660,19 @@
   var crtKey = "", crtLayers = 1;
   function setLayer(el, url, w, h, repeat) {
     el.style.display = url ? "block" : "none";
+    if (nativeSession) {
+      // Native UI draws IMG nodes, not CSS background images. One-pixel strips
+      // stretch along the constant axis; staggered masks tile vertically.
+      el.style.overflow = "hidden";
+      var step = repeat === "repeat-y" && h > 1 ? h : picH;
+      var n = url ? Math.ceil(picH / step) : 0;
+      while (el.children.length > n) el.removeChild(el.lastChild);
+      for (var i = 0; i < n; i++) {
+        var image = el.children[i] || node("img", el, { position: "absolute", left: "0", width: "100%", imageRendering: "pixelated" });
+        image.src = url; image.style.top = (i * step / pixDpr) + "px"; image.style.height = (step / pixDpr) + "px";
+      }
+      return;
+    }
     if (!url) return;
     el.style.backgroundImage = 'url("' + url + '")'; el.style.backgroundSize = (w / pixDpr) + "px " + (h / pixDpr) + "px";
     el.style.backgroundRepeat = repeat; el.style.backgroundPosition = "0 0";
@@ -743,6 +798,7 @@
   }
   function resetGraph() {
     graphPrevY = -1;
+    if (nativeSession) graphSegments.forEach(function (segment) { segment.style.display = "none"; });
     if (!graphCtx) return;
     graphCtx.clearRect(0, 0, GRAPH_W, GRAPH_H);
     graphCtx.fillStyle = "rgba(255,255,255,0.3)"; graphCtx.fillRect(0, GRAPH_Y60, GRAPH_W, 1);
@@ -751,6 +807,7 @@
   // Classic scrolling graph: shift the image left by one step (a single
   // self-copy drawImage) and draw only the newest segment at the right edge.
   function drawGraph() {
+    if (nativeSession) { if (shownCount >= 2) drawGraphFull(); return; }
     if (!graphCtx || shownCount < 2) return;
     var t0 = now(), g = graphCtx, L = shownTimes.length, S = GRAPH_STEP;
     var ms = shownTimes[(shownHead - 1 + L) % L] - shownTimes[(shownHead - 2 + L) % L];
@@ -771,6 +828,18 @@
   // Fallback if the canvas cannot copy onto itself: redraw the whole line.
   function drawGraphFull() {
     var g = graphCtx, L = shownTimes.length, n = Math.min(shownCount - 1, GRAPH_FRAMES);
+    if (nativeSession) {
+      var previousY = -1;
+      for (var j = 0; j < n; j++) {
+        var delta = shownTimes[(shownHead - n + j + L) % L] - shownTimes[(shownHead - n - 1 + j + L) % L];
+        var nextY = GRAPH_H - Math.min(delta, GRAPH_MAX_MS) / GRAPH_MAX_MS * (GRAPH_H - 2) - 1;
+        var segment = graphSegments[j] || (graphSegments[j] = node("div", graph, { position: "absolute", width: GRAPH_STEP + "px", backgroundColor: "#6ee26e" }));
+        Object.assign(segment.style, { display: previousY < 0 ? "none" : "block", left: (GRAPH_W - (n - j) * GRAPH_STEP) + "px",
+          top: Math.min(previousY < 0 ? nextY : previousY, nextY) + "px", height: Math.max(1, Math.abs(nextY - (previousY < 0 ? nextY : previousY))) + "px" });
+        previousY = nextY;
+      }
+      return;
+    }
     g.clearRect(0, 0, GRAPH_W, GRAPH_H);
     g.fillStyle = "rgba(255,255,255,0.3)"; g.fillRect(0, GRAPH_Y60, GRAPH_W, 1);
     g.beginPath();
@@ -802,7 +871,7 @@
         if (drewTest && motionSave) heap().copyWithin(ptr, motionSave, motionSave + MOTION_ROWS * W * 4);
         if (drewPixel && pixelSave) heap().copyWithin(ptr, pixelSave, pixelSave + W * H * 4);
       }
-      if (shownUrl !== url) { liveImage.style.backgroundImage = 'url("' + url + '")'; shownUrl = url; }
+      if (url && shownUrl !== url) { liveImage.style.backgroundImage = 'url("' + url + '")'; shownUrl = url; }
     } else if (ctx2d) {
       if (core._nes_bytes_per_pixel() !== 4) core._nes_set_format16(0);
       if (pixelTest) drawPixelTest(ptr);
@@ -1247,6 +1316,7 @@
     menuItems.forEach(function (m) { menuPanel.removeChild(m.row); }); menuItems = [];
     menuActions.forEach(function (a) {
       var row = node("div", menuPanel, { display: "flex", flexDirection: "row", alignItems: "center", fontSize: "21px", padding: "8px 14px", marginTop: "3px", borderRadius: "8px" });
+      if (nativeSession) row.style.flexShrink = "0";
       var label = node("div", row, { flexGrow: "1" }, Array.isArray(a) ? a[0] : a.label);
       var value = valueBox(row, { fontSize: "18px" });
       menuItems.push({ row: row, label: label, value: value });
@@ -1265,6 +1335,11 @@
       m.row.style.backgroundColor = active ? C.sel : "transparent"; m.row.style.borderLeft = "4px solid " + (active ? C.accent : "transparent");
       m.value.set(Array.isArray(o) ? null : o.choices()[o.get()], active);
     });
+    if (nativeSession && menuItems[menuIndex]) {
+      var r = menuItems[menuIndex].row.getBoundingClientRect(), p = menuPanel.getBoundingClientRect();
+      if (r.bottom > p.bottom - 26) menuPanel.scrollTop += r.bottom - p.bottom + 26;
+      else if (r.top < p.top + 26) menuPanel.scrollTop -= p.top + 26 - r.top;
+    }
   }
   function closeMenu() { menu.style.display = "none"; if (running) { mode = "running"; if (pauseInMenu) { resetClock(); lastTick = 0; } } }
 
@@ -1340,6 +1415,11 @@
     }
     if (toastUntil && now() > toastUntil) { toast.style.display = "none"; toastUntil = 0; }
     if (hintUntil && now() > hintUntil) { hint.style.display = "none"; hintUntil = 0; }
+    // Npad polling changes the DOM without a browser input event. Also repaint
+    // paused menus/toasts on runtimes without MutationObserver.
+    if (nativeView && !closed) {
+      try { nativeView.update(); } catch (e) { record("Native UI: " + e.message); close(); }
+    }
     schedule();
   }
   function schedule() {
@@ -1543,7 +1623,7 @@
 
   /* ---------------- Lifetime ---------------- */
   function close() {
-    if (closed) return lifetime;
+    if (closing) return closing;
     closed = true;
     if (frameHandle !== null && typeof cancelAnimationFrame === "function") cancelAnimationFrame(frameHandle);
     if (timerHandle !== null) clearTimeout(timerHandle);
@@ -1551,14 +1631,30 @@
     closeOutputs();
     if (pad) { try { pad.close(); } catch (e) { record("Pad close: " + e.message); } pad = null; }
     removers.forEach(function (fn) { fn(); }); removers = [];
-    if (root.parentNode) root.parentNode.removeChild(root);
-    if (window.__civswitchApp === instance) delete window.__civswitchApp;
-    finish();
-    return lifetime;
+    closing = (async function () {
+      try {
+        if (nativeAttach) { try { await nativeAttach; } catch (_) {} }
+        if (nativeView) await nativeView.close();
+      } finally {
+        nativeView = null;
+        if (root.parentNode) root.parentNode.removeChild(root);
+        if (window.__civswitchApp === instance) delete window.__civswitchApp;
+        finish();
+      }
+    })();
+    return closing;
   }
   var instance = { id: APP_ID, close: close, lifetime: lifetime, diagnostics: diagnostics,
     getState: function () { return { mode: mode, roms: roms.length, running: running && running.name, frames: running ? running.emitted : 0, players: pad && pad.players ? pad.players() : 0, p2: p2Bits, focus: focusArea, view: LIST_VIEWS[listView] }; } };
   window.__civswitchApp = instance;
+
+  if (nativeSession) {
+    try {
+      nativeAttach = sdk.app.mount(root, { native: !!N, log: record });
+      nativeView = await nativeAttach;
+      if (closed) { await close(); return; }
+    } catch (e) { await close(); throw e; }
+  }
 
   try {
     if (nativeError) throw Error("The console bridge could not start: " + nativeError);

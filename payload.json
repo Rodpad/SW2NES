@@ -13,6 +13,9 @@
   ],
   "icon": "app/icon.png",
   "extensions": {
+    "nativeUi": {
+      "api": 1
+    },
     "updates": {
       "schema": 1,
       "releasesUrl": "https://github.com/Rodpad/SW2NES/releases/latest",
