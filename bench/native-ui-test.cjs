@@ -63,6 +63,29 @@ const server = createServer(async (req, res) => {
       const [width,height] = [[1280,720],[960,540],[1920,1080]][cycle];
       await browser.call('Emulation.setDeviceMetricsOverride', {width,height,deviceScaleFactor:1,mobile:false});
       assert.equal(await ev('done'), false, 'evaluation must retain the app lifetime');
+      // Both Npad stick flags and D-pad bits follow the visual layout.
+      await press(524288);
+      assert.equal(await ev('__civswitchApp.getState().focus'), 'buttons');
+      assert.equal(await ev('__civswitchApp.getState().browserButton'), 'Settings');
+      await press(262144);
+      assert.equal(await ev('__civswitchApp.getState().browserButton'), 'Refresh');
+      await press(16384);
+      assert.equal(await ev('__civswitchApp.getState().browserButton'), 'Exit');
+      assert.equal(await ev('document.getElementById("sw2nes-action-exit").getAttribute("data-selected")'), 'true');
+      assert.ok(await ev('session.active.lease.scene.commands.some(c=>c.id==="sw2nes-action-exit"&&c.kind==="rect"&&Math.abs(c.color[0]-228/255)<.01)'), 'native Exit highlight follows input');
+      await press(32768);
+      assert.equal(await ev('__civswitchApp.getState().browserButton'), 'Exit', 'Down does not move across a horizontal button row');
+      await press(4096); await press(65536);
+      assert.equal(await ev('__civswitchApp.getState().browserButton'), 'Settings');
+      await press(8192); await press(131072);
+      assert.equal(await ev('__civswitchApp.getState().focus'), 'tabs');
+      await press(262144);
+      assert.equal(await ev('__civswitchApp.getState().view'), 'Favourites');
+      await press(524288);
+      assert.equal(await ev('__civswitchApp.getState().focus'), 'buttons', 'empty tabs still reach the actions');
+      await press(8192); await press(65536); await press(32768);
+      assert.equal(await ev('__civswitchApp.getState().view'), 'All');
+      assert.equal(await ev('__civswitchApp.getState().focus'), 'list');
       await press(1);
       await until('__civswitchApp.getState().frames > 8');
       await until('session.__sw2nesGraph && session.__sw2nesGraph.bytes.some((v,i)=>i%4===1&&v===226)');
@@ -105,11 +128,19 @@ const server = createServer(async (req, res) => {
       await press(1);
       await until('__civswitchApp.getState().mode === "browser"');
       // Lifetime cannot resolve while the view is still releasing its work.
+      if(cycle===2){
+        await press(524288);await press(262144);await press(262144);
+        await press(1);
+        assert.equal(await ev('document.getElementById("sw2nes-action-exit").textContent'),'Confirm exit');
+        assert.equal(await ev('done'),false,'first A confirms Exit');
+        await press(1);
+      }else{
       await ev(`window.oldApp=__civswitchApp;
         window.releaseClose=null;window.closeGate=new Promise(r=>releaseClose=r);
         window.closing=oldApp.close();void 0;`);
       assert.equal(await ev('done'), false);
       await ev('releaseClose();closing');
+      }
       assert.equal(await ev('done && !window.__civswitchApp && !session.active && !document.getElementById("sw2nes")'), true);
       assert.equal(await ev('CivAppsNativeUI.sessions.current === session'), true);
       assert.deepEqual(await ev('__mock.errors'), []);
@@ -129,7 +160,7 @@ const server = createServer(async (req, res) => {
     await ev('__civswitchApp.close();result');
     assert.equal(await ev('done && !window.__civswitchApp'), true);
     assert.deepEqual(await ev('__mock.errors'), []);
-    console.log('PASS: three shared-renderer cycles, CRT/graph, visible Quit without scrolling at 540p/720p/1080p, close ordering, pending attach, legacy texture fallback');
+    console.log('PASS: stick/D-pad spatial navigation, visible Exit and confirmation, retained CRT/graph, visible Quit at 540p/720p/1080p, close ordering, pending attach, legacy fallback');
   } finally {
     if (browser) await browser.close();
     server.close();

@@ -110,8 +110,8 @@ not an optical refresh measurement or a guarantee for other games.
 
 | Native renderer | Emulated FPS before → after | Presented FPS before → after |
 | --- | --- | --- |
-| CRT on, stats off | 35.6 → 59.5 | 35.6 → 33.0 |
-| CRT on, full stats graph | 5.8 → 60.1 | 5.8 → 29.1 |
+| CRT on, stats off | 35.6 → 59.4 | 35.6 → 34.3 |
+| CRT on, full stats graph | 5.8 → 59.7 | 5.8 → 29.6 |
 
 Retained UI scenes avoid per-frame DOM serialization and a redundant UI check.
 The graph reuses one 480×40 RGBA image per native session. The existing adaptive
@@ -121,6 +121,13 @@ without depending on Gameface scrolling. Browser tests cover Quit at 540p,
 720p and 1080p with scrolling disabled, retained graph reuse and UI updates
 without DOM serialization. A console check selected the visible Quit action and
 returned to the game list on the same native owner.
+
+UI navigation normalizes both stick axes to the D-pad directions, including
+left/right repeat. The bottom actions move horizontally; Up returns to the list
+or tabs, and Down stays on the action row. Native focus uses a filled accent
+background, a light border and bold text, with `data-selected` allowing the SDK
+to wait for settled focus styles. Console checks covered Settings/Refresh/Exit,
+tab navigation, Exit confirmation/close and the actual Exit highlight pixels.
 
 ## Licence
 

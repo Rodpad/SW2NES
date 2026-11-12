@@ -86,7 +86,9 @@
   // Visible buttons under the list (no hidden button mappings needed).
   function uiButton(parent, text) { return node("div", parent, { flexGrow: "1", textAlign: "center", fontSize: "18px", padding: "9px 0", margin: "0 5px", borderRadius: "8px", border: "1px solid " + C.line, backgroundColor: C.bg }, text); }
   var btnRow = node("div", browserWin, { display: "flex", flexDirection: "row", marginTop: "12px", flexShrink: "0" });
-  var BROWSER_BUTTONS = ["Settings", "Refresh", "Exit"], browserBtns = BROWSER_BUTTONS.map(function (t) { return uiButton(btnRow, t); });
+  var BROWSER_BUTTONS = ["Settings", "Refresh", "Exit"], browserBtns = BROWSER_BUTTONS.map(function (t) {
+    var button = uiButton(btnRow, t); button.id = "sw2nes-action-" + t.toLowerCase(); button.setAttribute("role", "button"); return button;
+  });
   var focusArea = "list", btnIndex = 0;
   // Settings window (defaults for all games), same style as the list window.
   var settingsWin = node("div", browser, { width: "50%", maxHeight: "90%", display: "none", flexDirection: "column", padding: "18px 20px", boxSizing: "border-box",
@@ -106,6 +108,7 @@
       var label = node("div", row, { flexGrow: "1", overflow: "hidden", whiteSpace: "nowrap" }, "");
       var tag = node("div", row, { fontSize: "14px", marginLeft: "12px", padding: "2px 8px", borderRadius: "4px", whiteSpace: "nowrap" }, "");
       rows.push({ row: row, label: label, tag: tag });
+      if (nativeSession) row.style.boxSizing = "border-box";
     }
     return rows[i];
   }
@@ -461,6 +464,7 @@
       var tOn = ti === listView, tFocus = focusArea === "tabs" && tOn;
       tabBtns[ti].style.backgroundColor = tFocus ? C.sel : tOn ? C.line : "transparent";
       tabBtns[ti].style.borderColor = tFocus ? C.accent : C.line; tabBtns[ti].style.color = tOn ? C.text : C.dim;
+      browserFocus(tabBtns[ti], tFocus);
     }
     if (listView === 1) emptyNote.textContent = "No favourites yet.\n\nWhile playing, open the menu (L + R) and set Favourite to On.";
     else if (listView === 2) emptyNote.textContent = "No recently played games yet.";
@@ -483,6 +487,7 @@
       row.tag.style.color = fav ? "#1a1300" : C.dim; row.tag.style.backgroundColor = fav ? "#f2c94c" : "transparent";
       row.row.style.backgroundColor = active ? C.sel : "transparent";
       row.row.style.borderLeft = "4px solid " + (active ? C.accent : "transparent");
+      browserFocus(row.row, active);
     }
     var scroll = roms.length > VISIBLE;
     scrollTrack.style.display = scroll ? "block" : "none";
@@ -498,8 +503,18 @@
       b.textContent = bi === 2 && exitArmed ? "Confirm exit" : BROWSER_BUTTONS[bi];
       b.style.backgroundColor = on ? C.sel : C.bg; b.style.borderColor = on ? C.accent : C.line;
       b.style.color = bi === 2 && exitArmed ? C.accent : C.text;
+      browserFocus(b, on);
     }
     footer.style.display = "none";
+  }
+  function browserFocus(control, active) {
+    // Also tells the SDK to wait until computed focus borders match the new
+    // inline state before retaining a scene on Gameface.
+    control.setAttribute("data-selected", active ? "true" : "false");
+    if (!nativeSession) return;
+    control.style.border = "2px solid " + (active ? C.text : C.line);
+    control.style.fontWeight = active ? "bold" : "normal";
+    if (active) { control.style.backgroundColor = C.accent; control.style.color = C.text; }
   }
 
   function showMessage(text, then) { changedNativeUi(); messageText.textContent = text; message.style.display = "flex"; messageThen = then || null; mode = "message"; }
@@ -1401,12 +1416,18 @@
   }
   // Edge/auto-repeat events for menus.
   function navEvents(bits) {
+    // Npad stick directions occupy separate bits from the D-pad. Normalize
+    // both axes for all menus; NES gameplay keeps its original raw mapping.
+    if (bits & BTN.SL) bits |= BTN.LEFT;
+    if (bits & BTN.SU) bits |= BTN.UP;
+    if (bits & BTN.SR) bits |= BTN.RIGHT;
+    if (bits & BTN.SD) bits |= BTN.DOWN;
     var pressed = bits & ~lastBits, t = now(), out = 0;
-    var dirs = (bits & (BTN.UP | BTN.SU) ? 1 : 0) | (bits & (BTN.DOWN | BTN.SD) ? 2 : 0);
+    var dirs = (bits & BTN.UP ? 1 : 0) | (bits & BTN.DOWN ? 2 : 0) | (bits & BTN.LEFT ? 4 : 0) | (bits & BTN.RIGHT ? 8 : 0);
     if (dirs !== held) { held = dirs; repeatAt = t + 380; out |= dirs ? dirs << 8 : 0; }
     else if (dirs && t >= repeatAt) { repeatAt = t + 110; out |= dirs << 8; }
     lastBits = bits;
-    return { pressed: pressed, up: !!(out & 256), down: !!(out & 512) };
+    return { pressed: pressed, up: !!(out & 256), down: !!(out & 512), left: !!(out & 1024), right: !!(out & 2048) };
   }
 
   /* ---------------- Main loop ---------------- */
@@ -1616,19 +1637,19 @@
     if (mode === "browser") {
       if (exitArmed && (now() > exitArmed || (pressed & ~(BTN.A | BTN.B)) || ev.up || ev.down || focusArea !== "buttons" || btnIndex !== 2)) { exitArmed = 0; paintBrowser(); }
       if (focusArea === "tabs") {
-        if (pressed & BTN.LEFT) setListView(Math.max(0, listView - 1));
-        if (pressed & BTN.RIGHT) setListView(Math.min(LIST_VIEWS.length - 1, listView + 1));
+        if (ev.left) setListView(Math.max(0, listView - 1));
+        if (ev.right) setListView(Math.min(LIST_VIEWS.length - 1, listView + 1));
         if (ev.down) { focusArea = roms.length ? "list" : "buttons"; selected = 0; paintBrowser(); }
       } else if (focusArea === "list" && roms.length) {
         if (ev.up) { if (selected === 0) focusArea = "tabs"; else selected--; paintBrowser(); }
         if (ev.down) { if (selected === roms.length - 1) { focusArea = "buttons"; } else selected++; paintBrowser(); }
-        if (pressed & BTN.LEFT) { selected = Math.max(0, selected - VISIBLE); paintBrowser(); }
-        if (pressed & BTN.RIGHT) { selected = Math.min(roms.length - 1, selected + VISIBLE); paintBrowser(); }
+        if (ev.left) { selected = Math.max(0, selected - VISIBLE); paintBrowser(); }
+        if (ev.right) { selected = Math.min(roms.length - 1, selected + VISIBLE); paintBrowser(); }
         if ((pressed & BTN.A) && roms[selected]) { startGame(roms[selected]); return; }
       } else {
         if (ev.up) { focusArea = roms.length ? "list" : "tabs"; if (roms.length) selected = roms.length - 1; paintBrowser(); }
-        if (pressed & BTN.LEFT) { btnIndex = Math.max(0, btnIndex - 1); paintBrowser(); }
-        if (pressed & BTN.RIGHT) { btnIndex = Math.min(browserBtns.length - 1, btnIndex + 1); paintBrowser(); }
+        if (ev.left) { btnIndex = Math.max(0, btnIndex - 1); paintBrowser(); }
+        if (ev.right) { btnIndex = Math.min(browserBtns.length - 1, btnIndex + 1); paintBrowser(); }
         if (pressed & BTN.A) {
           if (btnIndex === 0) openSettings();
           else if (btnIndex === 1) { footer.textContent = "Refreshing..."; footer.style.display = "block"; mode = "loading"; scan().then(function () { if (mode === "loading") mode = "browser"; paintBrowser(); }); }
@@ -1643,8 +1664,8 @@
       if (ev.up) { settingsIndex = (settingsIndex - 1 + nItems + 1) % (nItems + 1); paintSettings(); }
       if (ev.down) { settingsIndex = (settingsIndex + 1) % (nItems + 1); paintSettings(); }
       if (settingsIndex < nItems) {
-        if (pressed & BTN.LEFT) changeSetting(-1);
-        if (pressed & (BTN.RIGHT | BTN.A)) changeSetting(1);
+        if (ev.left) changeSetting(-1);
+        if (ev.right || pressed & BTN.A) changeSetting(1);
       } else if (pressed & BTN.A) { closeSettings(); return; }
       if (pressed & BTN.B) closeSettings();
     } else if (mode === "menu") {
@@ -1655,8 +1676,8 @@
       if (ev.down) { menuIndex = (menuIndex + 1) % menuActions.length; paintMenu(); }
       var item = menuActions[menuIndex];
       if (!Array.isArray(item)) {
-        if (pressed & BTN.LEFT) cycleMenuOption(-1);
-        if (pressed & (BTN.RIGHT | BTN.A)) cycleMenuOption(1);
+        if (ev.left) cycleMenuOption(-1);
+        if (ev.right || pressed & BTN.A) cycleMenuOption(1);
       } else if (pressed & BTN.A) item[1]();
       if (pressed & BTN.B) closeMenu();
     } else if (mode === "ggedit") {
@@ -1691,7 +1712,7 @@
     return closing;
   }
   var instance = { id: APP_ID, close: close, lifetime: lifetime, diagnostics: diagnostics,
-    getState: function () { return { mode: mode, roms: roms.length, running: running && running.name, frames: running ? running.emitted : 0, players: pad && pad.players ? pad.players() : 0, p2: p2Bits, focus: focusArea, view: LIST_VIEWS[listView] }; } };
+    getState: function () { return { mode: mode, roms: roms.length, running: running && running.name, frames: running ? running.emitted : 0, players: pad && pad.players ? pad.players() : 0, p2: p2Bits, focus: focusArea, browserButton: BROWSER_BUTTONS[btnIndex], selected: selected, view: LIST_VIEWS[listView] }; } };
   window.__civswitchApp = instance;
 
   if (nativeSession) {
