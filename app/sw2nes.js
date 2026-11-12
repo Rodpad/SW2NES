@@ -11,6 +11,8 @@
   var ui = window.CivAppsNativeUI, sdk = window.CivHomebrewSDK;
   var nativeSession = ui && (ui.sessions.current || await ui.sessions.pending);
   var nativeView = null, nativeAttach = null, closing = null;
+  var nativeUiRevision = 0, nativeUiObserver = null, nativePresented = false;
+  function changedNativeUi() { if (nativeSession) nativeUiRevision++; }
   if (nativeSession && (!sdk || !sdk.app || !sdk.framebuffer))
     throw Error("Update CivHomebrew to SDK 1.3.0 or newer and restart Civ VII before starting SW2NES.");
 
@@ -35,6 +37,7 @@
 
   /* ---------------- DOM ---------------- */
   function node(tag, parent, style, text) {
+    changedNativeUi();
     var e = document.createElement(tag); Object.assign(e.style, style || {});
     if (text !== undefined) e.textContent = text; if (parent) parent.appendChild(e); return e;
   }
@@ -43,10 +46,18 @@
     color: C.text, fontFamily: "Arial, sans-serif", zIndex: "10", overflow: "hidden", outline: "none" });
   root.id = APP_ID; root.tabIndex = -1;
   if (nativeSession) root.setAttribute("data-civ-native-ui", "1");
+  if (nativeSession) root.__civNanoVGSceneKey = function () {
+    // Pixels change independently of layout. Avoid serializing the entire DOM
+    // (including cached CRT PNGs and hidden screens) on every emulated frame.
+    return [window.innerWidth, window.innerHeight, nativeUiRevision, mode,
+      stats.textContent, toast.style.display, hint.style.display, testLabel.textContent, testLabel.style.display].join(":");
+  };
   function resizeNativeRoot() {
     if (!nativeSession) return;
+    changedNativeUi();
     root.style.width = window.innerWidth + "px"; root.style.height = window.innerHeight + "px";
     if (menuPanel) menuPanel.style.maxHeight = Math.max(100, window.innerHeight * 0.9 - 52) + "px";
+    if (mode === "menu") paintMenu();
     if (nativeView) nativeView.invalidate();
   }
   resizeNativeRoot();
@@ -127,16 +138,15 @@
   var stats = node("div", statsBar, { fontSize: "18px", color: "#9dfc9d", whiteSpace: "pre", fontFamily: "Courier New, monospace" }, "");
   // Frametime graph: time between displayed frames, scrolling left (newest at the right), 2 px per frame.
   var GRAPH_STEP = 2, GRAPH_FRAMES = 240, GRAPH_W = GRAPH_STEP * GRAPH_FRAMES, GRAPH_H = 40, GRAPH_MAX_MS = 33.4, graphMs = 0;  // 16.7 ms sits in the middle
-  var graph = node(nativeSession ? "div" : "canvas", statsBar, { width: GRAPH_W + "px", height: GRAPH_H + "px", marginLeft: "12px", display: "none" });
+  var graph = node("canvas", statsBar, { width: GRAPH_W + "px", height: GRAPH_H + "px", marginLeft: "12px", display: "none" });
   graph.width = GRAPH_W; graph.height = GRAPH_H;
-  // Ordinary canvas contents are not part of the native DOM snapshot. Use
-  // solid segments for the optional graph, retaining the canvas on Gameface.
-  var graphSegments = [];
+  // A second, small pixel source keeps the optional graph out of the DOM hot
+  // path. Retain one 480x40 image on the session, like the SDK framebuffer.
+  var graphPixels = null, graphImage = null;
   if (nativeSession) {
     Object.assign(graph.style, { position: "relative", overflow: "hidden", flexShrink: "0" });
     Object.assign(statsBar.style, { flexWrap: "wrap", maxWidth: "calc(100% - 52px)" });
     stats.style.setProperty("font-family", "CivNanoMono, monospace", "important");
-    node("div", graph, { position: "absolute", left: "0", right: "0", top: "20px", height: "1px", backgroundColor: "rgba(255,255,255,0.3)" });
   }
   var graphCtx = null; try { graphCtx = graph.getContext("2d"); } catch (e) { graphCtx = null; }
   // Hidden scratch canvas for scrolling: copying a canvas onto itself can smear
@@ -153,7 +163,7 @@
   var menu = node("div", root, { position: "absolute", zIndex: "10", left: "0", top: "0", right: "0", bottom: "0", display: "none", backgroundColor: "rgba(0,0,0,0.6)", alignItems: "center", justifyContent: "center" });
   var menuPanel = node("div", menu, { display: "flex", flexDirection: "column", width: "460px", padding: "26px", backgroundColor: C.panel, border: "1px solid " + C.line, borderRadius: "14px" });
   var menuTitle = node("div", menuPanel, { fontSize: "26px", fontWeight: "bold", marginBottom: "14px", overflow: "hidden", whiteSpace: "nowrap" }, "Paused");
-  if (nativeSession) { menuPanel.style.overflowY = "auto"; menuTitle.style.flexShrink = "0"; resizeNativeRoot(); }
+  if (nativeSession) { menuTitle.style.flexShrink = "0"; menuTitle.style.lineHeight = "1.2"; resizeNativeRoot(); }
   var menuItems = [];
 
   // Message screen
@@ -162,7 +172,7 @@
   var messageText = node("div", messagePanel, { whiteSpace: "pre-wrap" }, "");
   node("div", messagePanel, { color: C.dim, fontSize: "18px", marginTop: "18px" }, "Press A or B to continue");
 
-  function showToast(text, ms) { toast.textContent = text; toast.style.display = "block"; toastUntil = now() + (ms || 1800); }
+  function showToast(text, ms) { changedNativeUi(); toast.textContent = text; toast.style.display = "block"; toastUntil = now() + (ms || 1800); }
   var toastUntil = 0;
 
   /* ---------------- Platform: input, video, audio, files ---------------- */
@@ -403,6 +413,7 @@
     saveSettings(); mode = "browser"; settingsWin.style.display = "none"; browserWin.style.display = "flex"; paintBrowser();
   }
   function paintSettings() {
+    changedNativeUi();
     var n = SETTINGS_ITEMS.length, total = n + 1;
     var vh = window.innerHeight || 720, vis = Math.max(5, Math.min(total, Math.floor((vh * 0.9 - 36 - 50 - 14) / SET_ROW_H)));
     if (settingsIndex < settingsTop) settingsTop = settingsIndex; if (settingsIndex >= settingsTop + vis) settingsTop = settingsIndex - vis + 1;
@@ -443,6 +454,7 @@
     return x.length - y.length;
   }
   function paintBrowser() {
+    changedNativeUi();
     count.textContent = roms.length ? roms.length + (roms.length === 1 ? " game" : " games") : "";
     emptyNote.style.display = roms.length ? "none" : "block";
     for (var ti = 0; ti < tabBtns.length; ti++) {
@@ -490,7 +502,7 @@
     footer.style.display = "none";
   }
 
-  function showMessage(text, then) { messageText.textContent = text; message.style.display = "flex"; messageThen = then || null; mode = "message"; }
+  function showMessage(text, then) { changedNativeUi(); messageText.textContent = text; message.style.display = "flex"; messageThen = then || null; mode = "message"; }
   var messageThen = null;
 
   /* ---------------- Video / audio setup ---------------- */
@@ -522,6 +534,7 @@
       texture = { format: 28, close: frame.close, present: function (bytes, ptr) {
         if (!Number.isInteger(ptr) || ptr < 0 || ptr + FRAME_BYTES > bytes.length) throw Error("Video framebuffer range rejected.");
         frame.present(bytes.subarray(ptr, ptr + FRAME_BYTES));
+        nativePresented = true;
         return null;
       } };
     }
@@ -678,6 +691,7 @@
     el.style.backgroundRepeat = repeat; el.style.backgroundPosition = "0 0";
   }
   function applyCrt() {
+    changedNativeUi();
     var on = crtStyle > 0 && running && picW > 0;
     if (!on) { crtOverlay.style.display = "none"; crtOverlay2.style.display = "none"; return; }
     var key = [crtStyle, crtDensity, picW, picH, picSX, picSY, picOX, picOY, pixDpr].join(",");
@@ -730,6 +744,7 @@
   // pixel). Nearest-neighbour always. Cropping just offsets the image.
   var pixDpr = 1, viewInfo = "";
   function fitPicture() {
+    changedNativeUi();
     var dpr = window.devicePixelRatio > 0 ? window.devicePixelRatio : 1;
     var vwCss = window.innerWidth || (document.documentElement && document.documentElement.clientWidth) || 1280;
     var vhCss = window.innerHeight || (document.documentElement && document.documentElement.clientHeight) || 720;
@@ -791,6 +806,7 @@
   // (which cost ~0.8 ms per frame on the console). A dim line marks 16.7 ms.
   var graphPrevY = -1, graphScrollOk = true, GRAPH_Y60 = GRAPH_H - Math.round(16.7 / GRAPH_MAX_MS * GRAPH_H);
   function applyStatsLevel() {
+    changedNativeUi();
     showStats = statsLevel > 0;
     statsBar.style.display = statsLevel > 0 && running ? "flex" : "none";
     graph.style.display = statsLevel === 3 ? "block" : "none";
@@ -798,7 +814,21 @@
   }
   function resetGraph() {
     graphPrevY = -1;
-    if (nativeSession) graphSegments.forEach(function (segment) { segment.style.display = "none"; });
+    if (nativeSession) {
+      if (!graphImage) {
+        var retained = nativeSession.__sw2nesGraph;
+        if (!retained) {
+          var bytes = new Uint8Array(GRAPH_W * GRAPH_H * 4);
+          retained = nativeSession.__sw2nesGraph = { bytes: bytes, image: nativeSession.geometry.pixels(GRAPH_W, GRAPH_H, bytes) };
+        }
+        graphPixels = retained.bytes; graphImage = retained.image;
+        graph.setAttribute("data-civ-pixels", graphImage.source);
+      }
+      graphPixels.fill(0);
+      for (var x = 0; x < GRAPH_W; x++) graphPixels.set([255, 255, 255, 77], (GRAPH_Y60 * GRAPH_W + x) * 4);
+      graphImage.update(graphPixels);
+      return;
+    }
     if (!graphCtx) return;
     graphCtx.clearRect(0, 0, GRAPH_W, GRAPH_H);
     graphCtx.fillStyle = "rgba(255,255,255,0.3)"; graphCtx.fillRect(0, GRAPH_Y60, GRAPH_W, 1);
@@ -807,7 +837,29 @@
   // Classic scrolling graph: shift the image left by one step (a single
   // self-copy drawImage) and draw only the newest segment at the right edge.
   function drawGraph() {
-    if (nativeSession) { if (shownCount >= 2) drawGraphFull(); return; }
+    if (nativeSession) {
+      if (!graphImage || shownCount < 2) return;
+      var begin = now(), length = shownTimes.length, stride = GRAPH_W * 4;
+      var delta = shownTimes[(shownHead - 1 + length) % length] - shownTimes[(shownHead - 2 + length) % length];
+      var nextY = GRAPH_H - Math.min(delta, GRAPH_MAX_MS) / GRAPH_MAX_MS * (GRAPH_H - 2) - 1;
+      for (var row = 0; row < GRAPH_H; row++) {
+        graphPixels.copyWithin(row * stride, row * stride + GRAPH_STEP * 4, (row + 1) * stride);
+        graphPixels.fill(0, (row + 1) * stride - GRAPH_STEP * 4, (row + 1) * stride);
+      }
+      for (var x = 0; x < GRAPH_STEP; x++) {
+        var column = GRAPH_W - GRAPH_STEP + x;
+        graphPixels.set([255, 255, 255, 77], (GRAPH_Y60 * GRAPH_W + column) * 4);
+        if (graphPrevY >= 0) {
+          var from = graphPrevY + (nextY - graphPrevY) * x / GRAPH_STEP, to = graphPrevY + (nextY - graphPrevY) * (x + 1) / GRAPH_STEP;
+          for (var y = Math.max(0, Math.floor(Math.min(from, to))); y <= Math.min(GRAPH_H - 1, Math.ceil(Math.max(from, to))); y++) {
+            var at = (y * GRAPH_W + column) * 4;
+            graphPixels[at] = 110; graphPixels[at + 1] = 226; graphPixels[at + 2] = 110; graphPixels[at + 3] = 255;
+          }
+        }
+      }
+      graphPrevY = nextY; graphImage.update(graphPixels); graphMs += now() - begin;
+      return;
+    }
     if (!graphCtx || shownCount < 2) return;
     var t0 = now(), g = graphCtx, L = shownTimes.length, S = GRAPH_STEP;
     var ms = shownTimes[(shownHead - 1 + L) % L] - shownTimes[(shownHead - 2 + L) % L];
@@ -828,18 +880,6 @@
   // Fallback if the canvas cannot copy onto itself: redraw the whole line.
   function drawGraphFull() {
     var g = graphCtx, L = shownTimes.length, n = Math.min(shownCount - 1, GRAPH_FRAMES);
-    if (nativeSession) {
-      var previousY = -1;
-      for (var j = 0; j < n; j++) {
-        var delta = shownTimes[(shownHead - n + j + L) % L] - shownTimes[(shownHead - n - 1 + j + L) % L];
-        var nextY = GRAPH_H - Math.min(delta, GRAPH_MAX_MS) / GRAPH_MAX_MS * (GRAPH_H - 2) - 1;
-        var segment = graphSegments[j] || (graphSegments[j] = node("div", graph, { position: "absolute", width: GRAPH_STEP + "px", backgroundColor: "#6ee26e" }));
-        Object.assign(segment.style, { display: previousY < 0 ? "none" : "block", left: (GRAPH_W - (n - j) * GRAPH_STEP) + "px",
-          top: Math.min(previousY < 0 ? nextY : previousY, nextY) + "px", height: Math.max(1, Math.abs(nextY - (previousY < 0 ? nextY : previousY))) + "px" });
-        previousY = nextY;
-      }
-      return;
-    }
     g.clearRect(0, 0, GRAPH_W, GRAPH_H);
     g.fillStyle = "rgba(255,255,255,0.3)"; g.fillRect(0, GRAPH_Y60, GRAPH_W, 1);
     g.beginPath();
@@ -1060,6 +1100,7 @@
   function openCodeEditor() { ggEdit = { letters: [0, 0, 0, 0, 0, 0, -1, -1], pos: 0 }; menu.style.display = "none"; ggPanel.style.display = "flex"; mode = "ggedit"; paintCodeEditor(); }
   function ggEditCode() { return ggEdit.letters.filter(function (v) { return v >= 0; }).map(function (v) { return GG_LETTERS[v]; }).join(""); }
   function paintCodeEditor() {
+    changedNativeUi();
     for (var i = 0; i < 8; i++) {
       var v = ggEdit.letters[i];
       ggCells[i].textContent = v >= 0 ? GG_LETTERS[v] : "-";
@@ -1266,7 +1307,7 @@
   }
 
   /* ---------------- Pause menu ---------------- */
-  var menuIndex = 0, menuActions = [];
+  var menuIndex = 0, menuTop = 0, menuActions = [];
   // In-game menu. Actions run with A; options show "< value >" arrows and
   // cycle with Left/Right (A steps forward). Picture options apply at once.
   function menuOption(label, choices, get, set, after) { return { label: label, choices: choices, get: get, set: set, after: after }; }
@@ -1316,13 +1357,13 @@
     menuItems.forEach(function (m) { menuPanel.removeChild(m.row); }); menuItems = [];
     menuActions.forEach(function (a) {
       var row = node("div", menuPanel, { display: "flex", flexDirection: "row", alignItems: "center", fontSize: "21px", padding: "8px 14px", marginTop: "3px", borderRadius: "8px" });
-      if (nativeSession) row.style.flexShrink = "0";
+      if (nativeSession) Object.assign(row.style, { height: "40px", padding: "0 14px", boxSizing: "border-box", flexShrink: "0" });
       var label = node("div", row, { flexGrow: "1" }, Array.isArray(a) ? a[0] : a.label);
       var value = valueBox(row, { fontSize: "18px" });
       menuItems.push({ row: row, label: label, value: value });
     });
     menuTitle.textContent = title;
-    menuIndex = 0; paintMenu();
+    menuIndex = 0; menuTop = 0; paintMenu();
   }
   function cycleMenuOption(dir) {
     var o = menuActions[menuIndex]; if (Array.isArray(o)) return;
@@ -1330,16 +1371,19 @@
   }
 
   function paintMenu() {
+    changedNativeUi();
+    // Gameface scrolling need not update the native snapshot. Keep a bounded
+    // window of rows, as the ROM/settings lists do, including the last action.
+    var visible = Math.max(3, Math.floor(((window.innerHeight || 720) * 0.9 - 104) / 43));
+    if (menuIndex < menuTop) menuTop = menuIndex;
+    if (menuIndex >= menuTop + visible) menuTop = menuIndex - visible + 1;
+    menuTop = Math.max(0, Math.min(menuTop, menuItems.length - visible));
     menuItems.forEach(function (m, i) {
+      if (nativeSession) m.row.style.display = i >= menuTop && i < menuTop + visible ? "flex" : "none";
       var active = i === menuIndex, o = menuActions[i];
       m.row.style.backgroundColor = active ? C.sel : "transparent"; m.row.style.borderLeft = "4px solid " + (active ? C.accent : "transparent");
       m.value.set(Array.isArray(o) ? null : o.choices()[o.get()], active);
     });
-    if (nativeSession && menuItems[menuIndex]) {
-      var r = menuItems[menuIndex].row.getBoundingClientRect(), p = menuPanel.getBoundingClientRect();
-      if (r.bottom > p.bottom - 26) menuPanel.scrollTop += r.bottom - p.bottom + 26;
-      else if (r.top < p.top + 26) menuPanel.scrollTop -= p.top + 26 - r.top;
-    }
   }
   function closeMenu() { menu.style.display = "none"; if (running) { mode = "running"; if (pauseInMenu) { resetClock(); lastTick = 0; } } }
 
@@ -1398,6 +1442,7 @@
   }
   function step(ts) {
     if (closed) return;
+    nativePresented = false;
     sampleHeap();
     if (typeof ts === "number") { var tn = now(); if (lastRafTs) accAdd(rafTs, ts - lastRafTs); lastRafTs = ts; accAdd(rafLag, tn - ts); }
     if (probe && !probe.done) { probeTick(); schedule(); return; }
@@ -1417,7 +1462,7 @@
     if (hintUntil && now() > hintUntil) { hint.style.display = "none"; hintUntil = 0; }
     // Npad polling changes the DOM without a browser input event. Also repaint
     // paused menus/toasts on runtimes without MutationObserver.
-    if (nativeView && !closed) {
+    if (nativeView && !closed && !nativePresented) {
       try { nativeView.update(); } catch (e) { record("Native UI: " + e.message); close(); }
     }
     schedule();
@@ -1631,6 +1676,7 @@
     closeOutputs();
     if (pad) { try { pad.close(); } catch (e) { record("Pad close: " + e.message); } pad = null; }
     removers.forEach(function (fn) { fn(); }); removers = [];
+    if (nativeUiObserver) { nativeUiObserver.disconnect(); nativeUiObserver = null; }
     closing = (async function () {
       try {
         if (nativeAttach) { try { await nativeAttach; } catch (_) {} }
@@ -1653,6 +1699,10 @@
       nativeAttach = sdk.app.mount(root, { native: !!N, log: record });
       nativeView = await nativeAttach;
       if (closed) { await close(); return; }
+      if (typeof MutationObserver === "function") {
+        nativeUiObserver = new MutationObserver(changedNativeUi);
+        nativeUiObserver.observe(root, { subtree: true, attributes: true, childList: true, characterData: true });
+      }
     } catch (e) { await close(); throw e; }
   }
 

@@ -14,9 +14,9 @@ the running Launcher. SW2NES borrows that Launcher's UI view and RGBA
 framebuffer; it does not bundle or start another renderer. Menus, CRT masks
 and the optional stats graph use the native UI snapshot. Older Gameface
 Launchers and browser previews retain the original display path. Restart
-Civ VII after updating the Launcher/SDK. Native rendering and performance
-still require console qualification; the 60 fps feature below describes the
-original Gameface build.
+Civ VII after updating the Launcher/SDK. The 60 fps feature below describes the
+original Gameface build; native simulation and presented FPS are measured
+separately below.
 
 The view attachment and cleanup follow
 [Moonlight's native UI adapter](https://github.com/XITRIX/Moonlight-CivSwitch/blob/main/app/src/ui/native-ui.js).
@@ -102,6 +102,25 @@ node bench/native-ui-test.cjs /path/to/extracted/civhomebrew-sdk-1.3.0
 ```
 
 The browser previews need a ROM at `bench/test.nes`, which is not included.
+
+Native checks on Switch 2 with SDK 1.3.0, using an existing Contra Force (USA)
+ROM, compared 7-second windows after warm-up on the same renderer. No ROMs
+were added to the repository. These are simulation/presentation counters,
+not an optical refresh measurement or a guarantee for other games.
+
+| Native renderer | Emulated FPS before → after | Presented FPS before → after |
+| --- | --- | --- |
+| CRT on, stats off | 35.6 → 59.5 | 35.6 → 33.0 |
+| CRT on, full stats graph | 5.8 → 60.1 | 5.8 → 29.1 |
+
+Retained UI scenes avoid per-frame DOM serialization and a redundant UI check.
+The graph reuses one 480×40 RGBA image per native session. The existing adaptive
+frame skip keeps simulation near NES speed; this does not establish 60 rendered
+FPS. The native menu uses a bounded row window so its final action is visible
+without depending on Gameface scrolling. Browser tests cover Quit at 540p,
+720p and 1080p with scrolling disabled, retained graph reuse and UI updates
+without DOM serialization. A console check selected the visible Quit action and
+returned to the game list on the same native owner.
 
 ## Licence
 

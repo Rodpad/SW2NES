@@ -60,20 +60,27 @@ const server = createServer(async (req, res) => {
     const press = async buttons => { await ev('__mock.buttons=' + buttons); await sleep(130); await ev('__mock.buttons=0'); await sleep(130); };
     let framebuffer;
     for (let cycle = 0; cycle < 3; cycle++) {
+      const [width,height] = [[1280,720],[960,540],[1920,1080]][cycle];
+      await browser.call('Emulation.setDeviceMetricsOverride', {width,height,deviceScaleFactor:1,mobile:false});
       assert.equal(await ev('done'), false, 'evaluation must retain the app lifetime');
       await press(1);
       await until('__civswitchApp.getState().frames > 8');
-      await until('session.active.lease.scene.commands.some(c=>c.kind==="rect"&&c.color[1]>.8&&c.color[0]<.5)');
+      await until('session.__sw2nesGraph && session.__sw2nesGraph.bytes.some((v,i)=>i%4===1&&v===226)');
       const state = await ev(`({mode:__civswitchApp.getState().mode,
         pixels:document.querySelector('#sw2nes canvas[data-civ-pixels]').getAttribute('data-civ-pixels'),
         images:session.active.lease.scene.commands.filter(c=>c.kind==='image').length,
-        green:session.active.lease.scene.commands.filter(c=>c.kind==='rect'&&c.color[1]>.8&&c.color[0]<.5).length,
+        graph:session.active.lease.scene.commands.some(c=>c.kind==='image'&&c.source===session.__sw2nesGraph.image.source),
+        pixelSlots:[...session.geometry.textures.values()].filter(t=>t.type===3).length,
         errors:session.stats.errors,legacy:__mock.presents})`);
       assert.equal(state.mode, 'running');
       assert.equal(state.legacy, 0, 'native mode must not call the Gameface live-image provider');
       assert.deepEqual(state.errors, []);
-      assert.ok(state.images >= 3, 'NES framebuffer and both CRT strips must render');
-      assert.ok(state.green > 0, 'native graph must render');
+      assert.ok(state.images >= 4, 'NES framebuffer, both CRT strips and graph must render');
+      assert.ok(state.graph, 'native graph must render as a retained pixel image');
+      assert.equal(state.pixelSlots, 2, 'relaunch retains one NES image and one graph image');
+      const frames = await ev('__civswitchApp.getState().frames');
+      await ev(`Object.defineProperty(document.getElementById('sw2nes'),'innerHTML',{configurable:true,get(){throw Error('Do not serialize the DOM during framebuffer updates');}});`);
+      await until('__civswitchApp.getState().frames > '+(frames+4));
       if (cycle === 0) {
         const shot = await browser.call('Page.captureScreenshot', {format:'png'});
         await fs.writeFile(path.join(root, 'dist/native-ui-game.png'), Buffer.from(shot.data, 'base64'));
@@ -87,6 +94,16 @@ const server = createServer(async (req, res) => {
         const shot = await browser.call('Page.captureScreenshot', {format:'png'});
         await fs.writeFile(path.join(root, 'dist/native-ui-menu.png'), Buffer.from(shot.data, 'base64'));
       }
+      // Native rendering must not depend on the layout engine scrolling.
+      await ev(`window.menuPanel=[...document.querySelectorAll('#sw2nes div')].find(n=>n.children.length===0&&n.textContent==='Resume').parentNode.parentNode;
+        Object.defineProperty(menuPanel,'scrollTop',{configurable:true,get:()=>0,set:()=>{}});__mock.buttons=8192;`);
+      await until(`[...document.querySelectorAll('#sw2nes div')].some(n=>n.style.borderLeftColor==='rgb(228, 70, 59)'&&n.firstElementChild?.textContent==='Quit game')`);
+      await ev('__mock.buttons=0;new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)))');
+      const quit = await ev(`(()=>{const n=[...menuPanel.children].find(n=>n.firstElementChild?.textContent==='Quit game'),r=n.getBoundingClientRect(),p=menuPanel.getBoundingClientRect(),c=session.active.lease.scene.commands.find(c=>c.kind==='text'&&c.text==='Quit game');return {row:[r.top,r.bottom],panel:[p.top,p.bottom],text:c&&{baseline:c.baseline,clip:c.clip}};})()`);
+      assert.ok(quit.row[0]>=quit.panel[0]&&quit.row[1]<=quit.panel[1]&&quit.panel[0]>=0&&quit.panel[1]<=height, 'Quit game stays inside the menu at '+width+'x'+height+': '+JSON.stringify(quit));
+      assert.ok(quit.text&&quit.text.baseline>quit.text.clip[1]&&quit.text.baseline<quit.text.clip[3], 'Quit game is visible in native output');
+      await press(1);
+      await until('__civswitchApp.getState().mode === "browser"');
       // Lifetime cannot resolve while the view is still releasing its work.
       await ev(`window.oldApp=__civswitchApp;
         window.releaseClose=null;window.closeGate=new Promise(r=>releaseClose=r);
@@ -112,7 +129,7 @@ const server = createServer(async (req, res) => {
     await ev('__civswitchApp.close();result');
     assert.equal(await ev('done && !window.__civswitchApp'), true);
     assert.deepEqual(await ev('__mock.errors'), []);
-    console.log('PASS: three shared-renderer cycles, CRT/graph/menu, close ordering, pending attach, legacy texture fallback');
+    console.log('PASS: three shared-renderer cycles, CRT/graph, visible Quit without scrolling at 540p/720p/1080p, close ordering, pending attach, legacy texture fallback');
   } finally {
     if (browser) await browser.close();
     server.close();
