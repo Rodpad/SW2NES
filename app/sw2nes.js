@@ -14,7 +14,7 @@
   var nativeUiRevision = 0, nativeUiObserver = null, nativePresented = false;
   function changedNativeUi() { if (nativeSession) nativeUiRevision++; }
   if (nativeSession && (!sdk || !sdk.app || !sdk.framebuffer))
-    throw Error("Update CivHomebrew to SDK 1.3.0 or newer and restart Civ VII before starting SW2NES.");
+    throw Error("Update CivHomebrew to SDK 1.3.5 or newer and restart Civ VII before starting SW2NES.");
 
   var ROM_DIR = "save:/nes";
   var DATA_PARENT = "save:/civhomebrew/data";

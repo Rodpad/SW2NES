@@ -1,5 +1,5 @@
 // Host integration: actual SDK browser renderer + QuickNES, mocked console IO.
-// Usage: node bench/native-ui-test.cjs /path/to/extracted/civhomebrew-sdk-1.3.0
+// Usage: node bench/native-ui-test.cjs /path/to/extracted/civhomebrew-sdk-1.3.5
 // No game ROMs or device connection required.
 const assert = require('node:assert/strict');
 const fs = require('node:fs/promises');
@@ -57,7 +57,15 @@ const server = createServer(async (req, res) => {
     await until('!!window.ready');
     await ev('ready');
     await until('window.__civswitchApp && session.active && __civswitchApp.getState().roms === 1');
-    const press = async buttons => { await ev('__mock.buttons=' + buttons); await sleep(130); await ev('__mock.buttons=0'); await sleep(130); };
+    // Rendering can take longer than a short button pulse on a loaded host.
+    // Wait for the real mocked Npad getter to consume each press and release.
+    await ev(`window.npadSamples=()=>Object.keys(__mock.calls).filter(n=>n.includes('GetNpadStates')).reduce((n,k)=>n+__mock.calls[k],0);`);
+    await until('npadSamples() >= 2');
+    const setButtons = async buttons => {
+      await ev('window.sampleBefore=npadSamples();__mock.buttons=' + buttons);
+      await until('done || npadSamples() > sampleBefore');
+    };
+    const press = async buttons => { await setButtons(buttons); await setButtons(0); };
     let framebuffer;
     for (let cycle = 0; cycle < 3; cycle++) {
       const [width,height] = [[1280,720],[960,540],[1920,1080]][cycle];
@@ -120,8 +128,8 @@ const server = createServer(async (req, res) => {
       // Native rendering must not depend on the layout engine scrolling.
       await ev(`window.menuPanel=[...document.querySelectorAll('#sw2nes div')].find(n=>n.children.length===0&&n.textContent==='Resume').parentNode.parentNode;
         Object.defineProperty(menuPanel,'scrollTop',{configurable:true,get:()=>0,set:()=>{}});__mock.buttons=8192;`);
-      await until(`[...document.querySelectorAll('#sw2nes div')].some(n=>n.style.borderLeftColor==='rgb(228, 70, 59)'&&n.firstElementChild?.textContent==='Quit game')`);
-      await ev('__mock.buttons=0;new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)))');
+      await until(`(()=>{const selected=[...document.querySelectorAll('#sw2nes div')].some(n=>n.style.borderLeftColor==='rgb(228, 70, 59)'&&n.firstElementChild?.textContent==='Quit game');if(selected)__mock.buttons=0;return selected;})()`);
+      await setButtons(0);
       const quit = await ev(`(()=>{const n=[...menuPanel.children].find(n=>n.firstElementChild?.textContent==='Quit game'),r=n.getBoundingClientRect(),p=menuPanel.getBoundingClientRect(),c=session.active.lease.scene.commands.find(c=>c.kind==='text'&&c.text==='Quit game');return {row:[r.top,r.bottom],panel:[p.top,p.bottom],text:c&&{baseline:c.baseline,clip:c.clip}};})()`);
       assert.ok(quit.row[0]>=quit.panel[0]&&quit.row[1]<=quit.panel[1]&&quit.panel[0]>=0&&quit.panel[1]<=height, 'Quit game stays inside the menu at '+width+'x'+height+': '+JSON.stringify(quit));
       assert.ok(quit.text&&quit.text.baseline>quit.text.clip[1]&&quit.text.baseline<quit.text.clip[3], 'Quit game is visible in native output');
