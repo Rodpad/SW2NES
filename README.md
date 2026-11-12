@@ -68,7 +68,7 @@ Requirements: [Emscripten](https://emscripten.org/) 3.1.74 (via emsdk), Python 3
 # Emulator runtime (QuickNES + bridge, compiled to plain JavaScript)
 EMSDK=/path/to/emsdk ALIGN_LOWERING=1 tools/build.sh
 # Package the app
-python3 tools/package_payload.py --directory . --non-interactive --release 1.0.0 -o dist/sw2nes.civapp
+python3 tools/package_payload.py --directory . --non-interactive -o dist/sw2nes.civapp
 ```
 
 `tools/build.sh` regenerates `native/cpu_lib.js` (the JavaScript 6502 core) from

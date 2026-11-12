@@ -1168,7 +1168,7 @@
   }
 
   /* ---------------- Text files and automated test runs ---------------- */
-  var APP_VERSION = "1.0.1";
+  var APP_VERSION = "1.0.2";
   function ascii(text) { return text.replace(/[\u0080-\uffff]/g, function (c) { return "\\u" + ("000" + c.charCodeAt(0).toString(16)).slice(-4); }); }
   // One-time move from the app's former name: copy everything (settings, save
   // states, battery saves, cheats) from the old data folder when this app has
