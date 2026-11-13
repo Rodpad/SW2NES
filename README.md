@@ -11,6 +11,7 @@ No game ROMs are included or provided.
 
 ## Features
 
+- Runs on CivHomebrew's native Launcher (SDK native UI 1.3.6 or newer)
 - Locked 60 fps, display-synchronised presentation and integer scaling
 - Two players (a second controller is detected automatically)
 - 4 save-state slots per game, optional auto-load of the latest state, battery saves
@@ -54,7 +55,7 @@ Requirements: [Emscripten](https://emscripten.org/) 3.1.74 (via emsdk), Python 3
 # Emulator runtime (QuickNES + bridge, compiled to plain JavaScript)
 EMSDK=/path/to/emsdk ALIGN_LOWERING=1 tools/build.sh
 # Package the app
-python3 tools/package_payload.py --directory . --non-interactive --release 1.0.0 -o dist/sw2nes.civapp
+python3 tools/package_payload.py --directory . --non-interactive --release 1.1.0 -o dist/sw2nes.civapp
 ```
 
 `tools/build.sh` regenerates `native/cpu_lib.js` (the JavaScript 6502 core) from
@@ -65,7 +66,8 @@ python3 tools/package_payload.py --directory . --non-interactive --release 1.0.0
 | Path | Contents |
 | --- | --- |
 | `app/sw2nes.js` | The app: game list, settings, menus, game loop, video/audio output |
-| `app/native.js` | Console access through CivHomebrew: files, controllers, live video texture, AudioOut |
+| `app/native.js` | Console access through CivHomebrew: files, controllers, AudioOut |
+| `app/vendor/` | CivHomebrew SDK native UI runtime (the native Launcher draws the app and its game frames through it) |
 | `native/bridge.cpp` | C interface between QuickNES and the app (frames, audio, states, palettes) |
 | `native/*_lib.js` | Hand-written JavaScript for the 6502 CPU, pixel conversion and background rendering |
 | `tools/` | Build, packaging, CPU generator, icon generator |
@@ -88,5 +90,8 @@ The browser previews need a ROM at `bench/test.nes`, which is not included.
 
 ## Licence
 
-SW2NES is free software under the GNU General Public License v2 (see `LICENSE`),
-the same licence as QuickNES (by Shay Green / blargg; libretro QuickNES_Core).
+SW2NES is free software under the GNU General Public License v3 or later (see
+`LICENSE`). It includes QuickNES (by Shay Green / blargg; libretro QuickNES_Core,
+LGPL 2.1 or later) and the CivHomebrew SDK native UI runtime
+(`app/vendor/native-ui-runtime.js`, civapps-native-ui 1.3.6, GPL-3.0-or-later; its
+notices are in `app/vendor/civapps-native-ui-NOTICE.txt`).

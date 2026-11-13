@@ -17,7 +17,7 @@ Promise.all([fetch("test.nes").then(function (r) { return r.arrayBuffer(); }), f
     __mock.files.set(old + "/Diamond Chase.state", new Uint8Array([1, 2, 3, 4]));
   }
   __mock.files.set("save:/nes/readme.txt", new Uint8Array(4));
-  var source = v[1].scripts.map(function (s) { return s.source; }).join("\n;\n");
+  var source = v[1].scripts.filter(function (s) { return s.name.indexOf("app/vendor/") !== 0; }).map(function (s) { return s.source; }).join("\n;\n");
   window.__previewResult = (0, eval)(source);
   window.__previewResult.then(function () { document.title = "CLOSED"; }, function (e) { document.title = "FAILED " + e.message; });
 }).catch(function (e) { document.title = "FAILED " + e.message; });

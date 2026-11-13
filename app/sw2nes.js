@@ -34,6 +34,39 @@
   var root = node("div", document.body, { position: "fixed", left: "0", top: "0", right: "0", bottom: "0", backgroundColor: C.bg,
     color: C.text, fontFamily: "Arial, sans-serif", zIndex: "10", overflow: "hidden", outline: "none" });
   root.id = APP_ID; root.tabIndex = -1;
+  // Native Launcher (CivHomebrew SDK 1.3.x): the Launcher's NanoVG renderer
+  // owns the display and draws this DOM (a supported subset) itself; game
+  // frames go through the SDK's shared RGBA framebuffer. Without the SDK
+  // (browser previews, console mock) the old DOM/live-texture path is used.
+  var SDK = window.CivHomebrewSDK || null, view = null;
+  // Mount only when the native renderer is actually running (the native
+  // Launcher's shared session). The standard Launcher draws the game's own UI,
+  // where the DOM/live-texture path below works as before.
+  var nativeUi = window.CivAppsNativeUI, nativeSession = nativeUi && nativeUi.sessions && nativeUi.sessions.current || window.CivNanoVGSession && window.CivNanoVGSession.current || null;
+  var nativeOwner = !!(nativeSession && nativeSession.renderer && nativeSession.renderer.owner);
+  if (SDK && SDK.app && typeof SDK.app.mount === "function" && (nativeOwner || (preview && preview.nativeBrowser))) {
+    root.setAttribute("data-civ-native-ui", "1");
+    view = await SDK.app.mount(root, preview && preview.nativeBrowser ? { browser: true } : undefined);
+    if (view && view.blocked) {
+      // Launcher too old for native apps: the SDK shows its own "Update Launcher" screen.
+      var blockerView = view, blockerHandle = { id: APP_ID, lifetime: blockerView.lifetime, close: function () {
+        if (root.parentNode) root.parentNode.removeChild(root);
+        if (window.__civswitchApp === blockerHandle) delete window.__civswitchApp;
+        return blockerView.close(); } };
+      window.__civswitchApp = blockerHandle;
+      await blockerView.lifetime; await blockerHandle.close(); return;
+    }
+    if (view) root.style.fontFamily = "CivNanoVG, sans-serif";
+  }
+  // Cheap scene key for the renderer: a counter bumped on any DOM change
+  // (instead of serialising the whole UI's innerHTML on every game frame).
+  var uiVersion = 0, uiObserver = null;
+  if (view && typeof MutationObserver === "function") {
+    uiObserver = new MutationObserver(function () { uiVersion++; });
+    uiObserver.observe(root, { subtree: true, attributes: true, childList: true, characterData: true });
+    root.__civNanoVGSceneKey = function () { if (uiObserver.takeRecords().length) uiVersion++; return window.innerWidth + ":" + window.innerHeight + ":" + uiVersion; };
+  }
+  function redraw() { if (view) { try { view.invalidate(); } catch (e) { record("UI redraw: " + e.message); } } }
 
   // ROM browser screen
   // ROM list: full-screen background with a centred window, 50% wide and as
@@ -96,6 +129,8 @@
   // CRT filter: a tiled scanline pattern composited over the picture (no CPU cost).
   var crtOverlay = node("div", game, { position: "absolute", left: "0", top: "0", width: "100%", height: "100%", display: "none", zIndex: "2", backgroundRepeat: "repeat", imageRendering: "pixelated" });
   var crtOverlay2 = node("div", game, { position: "absolute", left: "0", top: "0", width: "100%", height: "100%", display: "none", zIndex: "2", imageRendering: "pixelated" });
+  var crtImg = node("img", crtOverlay, { position: "absolute", left: "0", top: "0", width: "100%", height: "100%", display: "none" });
+  var crtImg2 = node("img", crtOverlay2, { position: "absolute", left: "0", top: "0", width: "100%", height: "100%", display: "none" });
   var crtOn = true, crtStyle = 5, crtScale = 0;  // default: Scanlines + grille
   // Picture geometry: pixel aspect, scaling and edge crop (in NES pixels).
   var ASPECTS = ["1:1", "8:7", "4:3", "Stretch"], SCALES = ["Integer", "Fit"], CROPS = ["None", "Sides", "All edges"];
@@ -113,14 +148,21 @@
   var GRAPH_STEP = 2, GRAPH_FRAMES = 240, GRAPH_W = GRAPH_STEP * GRAPH_FRAMES, GRAPH_H = 40, GRAPH_MAX_MS = 33.4, graphMs = 0;  // 16.7 ms sits in the middle
   var graph = node("canvas", statsBar, { width: GRAPH_W + "px", height: GRAPH_H + "px", marginLeft: "12px", display: "none" });
   graph.width = GRAPH_W; graph.height = GRAPH_H;
+  // Native Launcher: no 2D canvas drawing, so the graph is drawn into extra
+  // rows under the picture in the game's framebuffer and shown by a second
+  // view of that framebuffer, clipped to those rows.
+  var NGRAPH_H = 40, graphWrap = node("div", statsBar, { position: "relative", width: "512px", height: NGRAPH_H + "px", marginLeft: "12px", overflow: "hidden", display: "none" });
+  var graphView = node("canvas", graphWrap, { position: "absolute", left: "0" });
   var graphCtx = null; try { graphCtx = graph.getContext("2d"); } catch (e) { graphCtx = null; }
   // Hidden scratch canvas for scrolling: copying a canvas onto itself can smear
   // on the console (overlapping copy), filling the area under the line.
   var graphBuf = null, graphBufCtx = null;
   try { graphBuf = document.createElement("canvas"); graphBuf.width = GRAPH_W; graphBuf.height = GRAPH_H; graphBufCtx = graphBuf.getContext("2d"); } catch (e) { graphBufCtx = null; }
   var graphAt = 0;
-  var testLabel = node("div", game, { position: "absolute", zIndex: "4", left: "50%", top: "40%", transform: "translateX(-50%)", fontSize: "44px", fontWeight: "bold", color: "#ffd84a", backgroundColor: "rgba(0,0,0,0.75)", padding: "10px 24px", borderRadius: "10px", display: "none" }, "");
-  var toast = node("div", game, { position: "absolute", zIndex: "3", left: "50%", bottom: "28px", transform: "translateX(-50%)", fontSize: "20px", backgroundColor: "rgba(10,12,18,0.85)", padding: "10px 18px", borderRadius: "8px", display: "none" }, "");
+  var testRow = node("div", game, { position: "absolute", zIndex: "4", left: "0", right: "0", top: "40%", display: "flex", flexDirection: "row", justifyContent: "center" });
+  var testLabel = node("div", testRow, { fontSize: "44px", fontWeight: "bold", color: "#ffd84a", backgroundColor: "rgba(0,0,0,0.75)", padding: "10px 24px", borderRadius: "10px", display: "none" }, "");
+  var toastRow = node("div", game, { position: "absolute", zIndex: "3", left: "0", right: "0", bottom: "28px", display: "flex", flexDirection: "row", justifyContent: "center" });
+  var toast = node("div", toastRow, { fontSize: "20px", backgroundColor: "rgba(10,12,18,0.85)", padding: "10px 18px", borderRadius: "8px", display: "none" }, "");
   var hint = node("div", game, { position: "absolute", zIndex: "3", right: "16px", bottom: "12px", fontSize: "16px", color: "#8891a4" }, "L + R: Menu");
 
   // Pause menu
@@ -353,15 +395,14 @@
     ["Switch X button", FACE_CHOICES, function () { return faceMap[2]; }, function (v) { faceMap[2] = v; }],
     ["Switch Y button", FACE_CHOICES, function () { return faceMap[3]; }, function (v) { faceMap[3] = v; }]
   ];
-  // "< value >" selector drawn with CSS triangles (the console font lacks arrow glyphs).
+  // "< value >" selector (ASCII arrows: the renderer's font has no arrow glyphs).
   function valueBox(parent, style) {
     var box = node("div", parent, Object.assign({ display: "none", flexDirection: "row", alignItems: "center", whiteSpace: "nowrap", marginLeft: "16px" }, style || {}));
-    var tri = function (left) { return node("div", box, { width: "0", height: "0", borderTop: "8px solid transparent", borderBottom: "8px solid transparent",
-      borderLeft: left ? "0" : "11px solid " + C.dim, borderRight: left ? "11px solid " + C.dim : "0" }); };
+    var tri = function (left) { return node("div", box, { fontWeight: "bold", color: C.dim }, left ? "<" : ">"); };
     var l = tri(true), text = node("div", box, { margin: "0 10px" }, ""), r = tri(false);
     return { box: box, set: function (t, active) {
       box.style.display = t === null ? "none" : "flex"; if (t === null) return;
-      text.textContent = t; var c = active ? C.text : C.dim; text.style.color = c; l.style.borderRightColor = c; r.style.borderLeftColor = c;
+      text.textContent = t; var c = active ? C.text : C.dim; text.style.color = c; l.style.color = c; r.style.color = c;
     } };
   }
   function settingChoices(i) { return SETTINGS_ITEMS[i][1] || crtChoiceNames(); }
@@ -471,7 +512,27 @@
   }
   // Display path: "texture" = native live texture (uploaded by the engine's
   // renderer); "canvas" = 2D canvas putImageData (drawn in the UI's own frame).
+  // Native Launcher: one SDK framebuffer (W x H, plus graph rows when the
+  // frame-time graph is on), drawn by a canvas element inside a clipping box.
+  var fb = null, fbRows = 0, fbBytes = null, fbGraphY = -1;
+  function openFramebuffer() {
+    fbRows = statsLevel === 3 ? NGRAPH_H : 0;
+    if (!canvas) {
+      canvasWrap = node("div", game, { position: "absolute", zIndex: "1", overflow: "hidden" });
+      canvas = node("canvas", canvasWrap, { position: "absolute", left: "0", top: "0" });
+    }
+    fb = SDK.framebuffer.create({ session: view.session, view: view, canvas: canvas, width: W, height: H + fbRows });
+    fbBytes = fbRows ? new Uint8Array(W * (H + fbRows) * 4) : null; fbGraphY = -1;
+    if (fbRows) { graphView.setAttribute("data-civ-pixels", fb.source); Object.assign(graphView.style, { width: (W * 2) + "px", height: (H + fbRows) + "px", top: -H + "px" }); }
+    else graphView.removeAttribute("data-civ-pixels");
+    canvasWrap.style.display = "block"; liveImage.style.display = "none"; fitPicture();
+  }
+  function closeFramebuffer() {
+    if (fb) { try { fb.close(); } catch (e) { record("Framebuffer close: " + e.message); } fb = null; }
+    graphView.removeAttribute("data-civ-pixels"); fbBytes = null;
+  }
   function openVideo() {
+    if (view) { core._nes_set_format16(0); openFramebuffer(); return; }
     if (N && (displayMode === "texture" || !canvasPixelsOk())) {
       core._nes_set_format16(videoFormat === 85 ? 1 : videoFormat === 86 ? 2 : 0);
       texture = N.texture(W, H, videoFormat, videoBuffers);
@@ -531,6 +592,7 @@
     for (var k = 0; k < 8; k++) { var on = (f >> (7 - k)) & 1, c = on ? 0xff00ffff : 0xff400000; for (var y2 = 10; y2 < MOTION_ROWS; y2++) A.fill(c, b + y2 * W + k * 32 + 1, b + y2 * W + k * 32 + 31); }
   }
   function closeOutputs() {
+    closeFramebuffer();
     if (texture) { try { texture.close(); } catch (e) { record("Texture close: " + e.message); } texture = null; }
     if (texture2) { try { texture2.close(); } catch (e) { record("Texture close: " + e.message); } texture2 = null; }
     if (audio) { try { audio.close(); } catch (e) { record("Audio close: " + e.message); } audio = null; }
@@ -619,6 +681,13 @@
   function setLayer(el, url, w, h, repeat) {
     el.style.display = url ? "block" : "none";
     if (!url) return;
+    if (view) {
+      // Native renderer: no tiled backgrounds. Strips are exactly as tall
+      // (rows) or wide (columns) as the picture and stretched along the other axis.
+      var img = el === crtOverlay ? crtImg : crtImg2;
+      if (repeat !== "repeat-x" && repeat !== "repeat-y") { el.style.display = "none"; return; }
+      img.src = url; img.style.display = "block"; return;
+    }
     el.style.backgroundImage = 'url("' + url + '")'; el.style.backgroundSize = (w / pixDpr) + "px " + (h / pixDpr) + "px";
     el.style.backgroundRepeat = repeat; el.style.backgroundPosition = "0 0";
   }
@@ -675,8 +744,8 @@
   // pixel). Nearest-neighbour always. Cropping just offsets the image.
   var pixDpr = 1, viewInfo = "";
   function fitPicture() {
-    var dpr = window.devicePixelRatio > 0 ? window.devicePixelRatio : 1;
     var vwCss = window.innerWidth || (document.documentElement && document.documentElement.clientWidth) || 1280;
+    var dpr = view ? 1920 / vwCss : window.devicePixelRatio > 0 ? window.devicePixelRatio : 1;
     var vhCss = window.innerHeight || (document.documentElement && document.documentElement.clientHeight) || 720;
     var vw = Math.round(vwCss * dpr), vh = Math.round(vhCss * dpr);
     var cx = cropMode >= 1 ? 8 : 0, cy = cropMode >= 2 ? 8 : 0, cw = W - 2 * cx, ch = H - 2 * cy;
@@ -699,7 +768,7 @@
     Object.assign(liveImage.style, box); Object.assign(crtOverlay.style, box); Object.assign(crtOverlay2.style, box);
     liveImage.style.backgroundSize = css(W * sx) + " " + css(H * sy);
     liveImage.style.backgroundPosition = css(-cx * sx) + " " + css(-cy * sy);
-    if (canvasWrap) { Object.assign(canvasWrap.style, box); Object.assign(canvas.style, { width: css(W * sx), height: css(H * sy), left: css(-cx * sx), top: css(-cy * sy) }); }
+    if (canvasWrap) { Object.assign(canvasWrap.style, box); Object.assign(canvas.style, { width: css(W * sx), height: css((H + fbRows) * sy), left: css(-cx * sx), top: css(-cy * sy) }); }
     pixDpr = dpr; picSX = sx; picSY = sy; picW = w; picH = h; picOX = cx; picOY = cy; crtScale = Math.max(1, Math.round(sy));
     var scr = typeof screen !== "undefined" ? screen.width + "x" + screen.height : "?";
     viewInfo = "Viewport " + vwCss + "x" + vhCss + " css, dpr " + dpr + " (" + vw + "x" + vh + " px), screen " + scr +
@@ -738,11 +807,14 @@
   function applyStatsLevel() {
     showStats = statsLevel > 0;
     statsBar.style.display = statsLevel > 0 && running ? "flex" : "none";
-    graph.style.display = statsLevel === 3 ? "block" : "none";
+    graph.style.display = statsLevel === 3 && !view ? "block" : "none";
+    graphWrap.style.display = statsLevel === 3 && view ? "block" : "none";
+    if (view && fb && (statsLevel === 3 ? NGRAPH_H : 0) !== fbRows) { closeFramebuffer(); openFramebuffer(); if (running) { core._nes_reconvert(); present(); } }
     if (statsLevel === 3) resetGraph();
   }
   function resetGraph() {
-    graphPrevY = -1;
+    graphPrevY = -1; fbGraphY = -1;
+    if (fbBytes) fbBytes.fill(0, W * H * 4);
     if (!graphCtx) return;
     graphCtx.clearRect(0, 0, GRAPH_W, GRAPH_H);
     graphCtx.fillStyle = "rgba(255,255,255,0.3)"; graphCtx.fillRect(0, GRAPH_Y60, GRAPH_W, 1);
@@ -781,10 +853,35 @@
     }
     g.stroke();
   }
+  // Native graph: scroll the graph rows left one pixel (shown 2x wide, so
+  // 2 screen px per frame like the canvas graph) and draw the newest column.
+  function drawFbGraph() {
+    if (shownCount < 2) return;
+    var B = fbBytes, L = shownTimes.length, rowB = W * 4, base = H * rowB, GH = fbRows, x = W - 1;
+    var ms = shownTimes[(shownHead - 1 + L) % L] - shownTimes[(shownHead - 2 + L) % L];
+    var y = GH - 1 - Math.round(Math.min(ms, GRAPH_MAX_MS) / GRAPH_MAX_MS * (GH - 2)), mid = GH - 1 - Math.round(16.7 / GRAPH_MAX_MS * (GH - 2));
+    var y0 = fbGraphY < 0 ? y : fbGraphY, lo = Math.min(y0, y), hi = Math.max(y0, y);
+    for (var r = 0; r < GH; r++) {
+      var o = base + r * rowB; B.copyWithin(o, o + 4, o + rowB);
+      var p = o + x * 4, on = r >= lo && r <= hi;
+      B[p] = on ? 110 : r === mid ? 90 : 0; B[p + 1] = on ? 226 : r === mid ? 90 : 0; B[p + 2] = on ? 110 : r === mid ? 90 : 0; B[p + 3] = 255;
+    }
+    fbGraphY = y;
+  }
   function present() {
     core._nes_convert();  // a conversion deferred after a heavy frame (no-op otherwise)
     var ptr = core._nes_video();
-    if (texture) {
+    if (fb) {
+      if (pixelTest) drawPixelTest(ptr);
+      if (motionTest) drawMotionTest(ptr);
+      try {
+        if (fbBytes) { fbBytes.set(heap().subarray(ptr, ptr + FRAME_BYTES)); drawFbGraph(); fb.present(fbBytes); }
+        else fb.present(heap().subarray(ptr, ptr + FRAME_BYTES));
+      } finally {
+        if (motionTest && motionSave) heap().copyWithin(ptr, motionSave, motionSave + MOTION_ROWS * W * 4);
+        if (pixelTest && pixelSave) heap().copyWithin(ptr, pixelSave, pixelSave + W * H * 4);
+      }
+    } else if (texture) {
       var url;
       var drewPixel = pixelTest && videoFormat === 28, drewTest = motionTest && videoFormat === 28;
       if (drewPixel) drawPixelTest(ptr);
@@ -1043,7 +1140,7 @@
   }
 
   /* ---------------- Text files and automated test runs ---------------- */
-  var APP_VERSION = "1.0.1";
+  var APP_VERSION = "1.1.1";
   function ascii(text) { return text.replace(/[\u0080-\uffff]/g, function (c) { return "\\u" + ("000" + c.charCodeAt(0).toString(16)).slice(-4); }); }
   // One-time move from the app's former name: copy everything (settings, save
   // states, battery saves, cheats) from the old data folder when this app has
@@ -1305,7 +1402,7 @@
       P.i++; P.start = t; accReset(P.gaps); P.over = 0; accReset(rafTs); accReset(rafLag);
       if (P.i >= P.levels.length) { P.done = true; return; }
     }
-    present(); if (statsLevel === 3) drawGraph();
+    present(); if (statsLevel === 3 && !view) drawGraph();
     var L = P.levels[P.i], ms = typeof L === "number" ? L : L[0] + Math.random() * (L[1] - L[0]);
     var until = t + ms; while (now() < until) {}
   }
@@ -1340,6 +1437,9 @@
     }
     if (toastUntil && now() > toastUntil) { toast.style.display = "none"; toastUntil = 0; }
     if (hintUntil && now() > hintUntil) { hint.style.display = "none"; hintUntil = 0; }
+    // Menus and lists: ask the native renderer to pick up DOM changes (while a
+    // game runs, every presented frame redraws the scene anyway).
+    if (view && (mode !== "running" || !fb)) redraw();
     schedule();
   }
   function schedule() {
@@ -1361,7 +1461,7 @@
     }
     lastTick = tickNow;
     var tmp = recPrev; recPrev = recCur; recCur = tmp; recCur.fill(0); recCur[0] = gap;
-    if (presentEarly && pendingFrame) { pendingFrame = false; var pv = now(); present(); if (statsLevel === 3) drawGraph(); var pe = now(); videoMs += pe - pv; recCur[1] = pe - pv; accAdd(presentOffsets, pe - tickNow); }
+    if (presentEarly && pendingFrame) { pendingFrame = false; var pv = now(); present(); if (statsLevel === 3 && !view) drawGraph(); var pe = now(); videoMs += pe - pv; recCur[1] = pe - pv; accAdd(presentOffsets, pe - tickNow); }
     if (!behindMenu) {
       var combo = (bits & (BTN.L | BTN.R)) === (BTN.L | BTN.R);
       if (combo && !comboLatch) { comboLatch = true; lastBits = bits; openMenu(); return; }
@@ -1424,7 +1524,7 @@
     }
     var t2 = now();
     running.emitted += due; emuCount += due;
-    if (drew) { if (presentEarly) pendingFrame = true; else { present(); if (statsLevel === 3) drawGraph(); accAdd(presentOffsets, now() - tickNow); } }
+    if (drew) { if (presentEarly) pendingFrame = true; else { present(); if (statsLevel === 3 && !view) drawGraph(); accAdd(presentOffsets, now() - tickNow); } }
     var t3 = now();
     emuMs += t1 - t0; audioMs += t2 - t1; videoMs += t3 - t2; inputMs += t0 - begin;
     recCur[2] = t1 - t0; recCur[3] = t2 - t1; if (recCur[7] !== 2) recCur[7] = drew ? 1 : 0;
@@ -1551,9 +1651,13 @@
     closeOutputs();
     if (pad) { try { pad.close(); } catch (e) { record("Pad close: " + e.message); } pad = null; }
     removers.forEach(function (fn) { fn(); }); removers = [];
-    if (root.parentNode) root.parentNode.removeChild(root);
-    if (window.__civswitchApp === instance) delete window.__civswitchApp;
-    finish();
+    if (uiObserver) { uiObserver.disconnect(); uiObserver = null; }
+    (async function () {
+      if (view) { try { await view.close(); } catch (e) { record("UI close: " + e.message); } }
+      if (root.parentNode) root.parentNode.removeChild(root);
+      if (window.__civswitchApp === instance) delete window.__civswitchApp;
+      finish();
+    })();
     return lifetime;
   }
   var instance = { id: APP_ID, close: close, lifetime: lifetime, diagnostics: diagnostics,

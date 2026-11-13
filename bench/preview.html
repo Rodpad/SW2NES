@@ -7,7 +7,7 @@
 window.SW2NESPreview = { roms: [{ name: "Diamond Chase.nes", url: "test.nes", size: 40976 }].concat(location.search.indexOf("smb") >= 0 ? [{ name: "smb.nes", url: "smb-local.nes", size: 40976 }] : [])
   .concat(location.search.indexOf("many") >= 0 ? Array.from({ length: 40 }, function (_, i) { return { name: "Test Game " + (i + 2) + ".nes", url: "test.nes", size: 40976 }; }) : []) };
 fetch("../dist/sw2nes.civapp").then(function (r) { return r.json(); }).then(function (pkg) {
-  var source = pkg.scripts.map(function (s) { return s.source; }).join("\n;\n");
+  var source = pkg.scripts.filter(function (s) { return s.name.indexOf("app/vendor/") !== 0; }).map(function (s) { return s.source; }).join("\n;\n");
   window.__previewResult = (0, eval)(source);
   window.__previewResult.then(function () { document.title = "CLOSED"; }, function (e) { document.title = "FAILED " + e.message; });
 }).catch(function (e) { document.title = "FAILED " + e.message; });
