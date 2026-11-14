@@ -3,10 +3,12 @@
 #include <stdint.h>
 #include <string.h>
 #include <stdlib.h>
+#include <new>
 #include "Nes_Emu.h"
 #include "Nes_Buffer.h"
 #include "Data_Reader.h"
 #include "abstract_file.h"
+#include "Nes_State.h"
 #ifdef SW2NES_PROFILE
 #include <emscripten.h>
 double sw2nes_prof[8];  // 0 frame, 1 cpu (from JS), 2 convert, 3 audio read; ms
@@ -22,6 +24,8 @@ enum { BUF_W = WIDTH + 16, BUF_H = HEIGHT + 2 };
 enum { SAMPLE_RATE = 48000, MAX_SAMPLES = 4096, AUDIO_CAP = 8192 };
 
 static Nes_Emu* emu = 0;
+static Nes_Emu* video_emu = 0;   // instance whose frame convert() uses (run-ahead: the second one)
+static Nes_Emu* last_video = 0;  // instance that drew the shown picture
 static Nes_Buffer nes_buffer;           // non-linear NES mixer, mono
 alignas(16) static uint8_t index_buffer[BUF_W * BUF_H];
 static uint32_t rgba[WIDTH * HEIGHT];
@@ -33,6 +37,7 @@ static int rs_pos = 0, rs_step = 0x10000;
 static int16_t rs_last = 0;
 static int audio_vol = 256, audio_lp = 0, lp_state = 0;
 static int audio_fill = 0;  // stereo frames accumulated since nes_audio_take()
+static int audio_discard = 0;  // run-ahead/rewind frames: drain the core's samples, output nothing
 static uint32_t palette32[256];
 static short last_palette[Nes_Emu::max_palette_size];
 static bool palette_valid = false;
@@ -60,8 +65,11 @@ EXPORT uint8_t* nes_rom_alloc(long size) {
   free(rom); rom = (uint8_t*)malloc(size); rom_size = rom ? size : 0; return rom;
 }
 
+static void runahead_close();
 EXPORT void nes_unload() {
+  runahead_close();
   audio_fill = 0; rs_pos = 0; rs_step = 0x10000; rs_last = 0; convert_pending = 0; lp_state = 0;
+  last_video = 0;
   if (emu) { emu->close(); delete emu; emu = 0; }
   palette_valid = false;
   prev_valid = false;
@@ -95,7 +103,14 @@ EXPORT void nes_reset(int hard) { if (emu) emu->reset(hard != 0, false); }
 EXPORT void nes_invalidate_video() { prev_valid = false; }
 static void convert();
 // Re-convert the current frame (e.g. after an output format change) without emulating.
-EXPORT void nes_reconvert() { if (emu) { prev_valid = false; convert(); } }
+// Re-converts the shown picture (palette change): from the instance that drew
+// it, and not at all before any picture exists.
+EXPORT void nes_reconvert() {
+  Nes_Emu* src = last_video ? last_video : emu;
+  if (!emu || !src || !last_video) return;
+  if (!src->frame().pixels) return;
+  prev_valid = false; video_emu = src; convert(); video_emu = 0;
+}
 // Test hook: force heavy (scrolling) conversion mode from the next diff evaluation on.
 static int force_heavy = 0;
 EXPORT void nes_test_force_heavy(int on) { force_heavy = on; }
@@ -148,8 +163,9 @@ static void update_palette(const Nes_Emu::frame_t& frame) {
 extern "C" int sw2nes_js_convert(const uint8_t* in, int pitch, uint32_t* out, uint32_t* prev, const uint32_t* pal, int rows, int mode);
 #endif
 
+static void note_video(Nes_Emu* e) { last_video = e; }
 static void convert() {
-  const Nes_Emu::frame_t& frame = emu->frame();
+  const Nes_Emu::frame_t& frame = (video_emu ? video_emu : emu)->frame();
 #ifdef SW2NES_PROFILE
   double tp = PROF_T();
 #endif
@@ -226,7 +242,7 @@ static void convert() {
 // render=2 renders but leaves pixel conversion for nes_convert(), so the caller
 // can move it to the next tick after a heavy frame; it must run before the
 // next nes_frame or present.
-EXPORT void nes_convert() { if (convert_pending) { convert_pending = 0; convert(); } }
+EXPORT void nes_convert() { if (convert_pending) { convert_pending = 0; convert(); note_video(emu); } }
 EXPORT int nes_frame(int pad1, int pad2, int render) {
   if (!emu) return -1;
   nes_convert();  // a deferred frame is never lost, even if the caller forgot
@@ -235,9 +251,10 @@ EXPORT int nes_frame(int pad1, int pad2, int render) {
   if (err) return -2;
   double t1 = PROF_T();
   if (render == 2) convert_pending = 1;
-  else if (render) convert();
+  else if (render) { convert(); note_video(emu); }
   double t2 = PROF_T();
   long n = emu->read_samples(mono, MAX_SAMPLES);
+  if (audio_discard) return 0;  // resampler and filter state stay untouched
   if (audio_vol != 256 || audio_lp) {
     // Volume (x/256) and an optional one-pole low-pass that softens the harsh top end.
     for (long i = 0; i < n; i++) {
@@ -336,3 +353,90 @@ EXPORT int nes_state_load(long size) {
   Mem_File_Reader reader(state_buf, size);
   return emu->load_state(reader) ? 0 : 1;
 }
+
+// ---- In-memory snapshots (native build: run-ahead and rewind) ----
+// A pool of Nes_State objects: saving/restoring copies emulator state without
+// serialising it. Frames run while audio is discarded leave the audio path
+// (resampler, filter) exactly as it was.
+static Nes_State* snaps = 0;
+static int snap_count = 0;
+EXPORT int nes_snap_alloc(int n) {
+  delete[] snaps; snaps = 0; snap_count = 0;
+  if (n <= 0) return 0;
+  snaps = new (std::nothrow) Nes_State[n];
+  snap_count = snaps ? n : 0;
+  return snap_count;
+}
+EXPORT int nes_snap_size() { return (int)sizeof(Nes_State); }
+EXPORT int nes_snap_save(int i) { if (!emu || i < 0 || i >= snap_count) return 0; emu->save_state(&snaps[i]); return 1; }
+EXPORT int nes_snap_load(int i) { if (!emu || i < 0 || i >= snap_count) return 0; emu->load_state(snaps[i]); return 1; }
+EXPORT void nes_set_audio_discard(int on) { audio_discard = on != 0; }
+
+// ---- Raw frame for GPU filters (NTSC): palette indices and their NES colours ----
+// nes_indices(): one byte per pixel (pitch nes_index_pitch()), first visible row;
+// nes_index_colors(): for each index, the NES colour 0-511 (incl. emphasis).
+static uint16_t index_colors[256];
+// From the instance that drew the shown picture (run-ahead: the second one).
+static Nes_Emu* shown_emu() { return last_video ? last_video : emu; }
+EXPORT const uint8_t* nes_indices() { Nes_Emu* e = shown_emu(); return e && e->frame().pixels ? e->frame().pixels + crop_top * BUF_W : 0; }
+EXPORT int nes_index_pitch() { return BUF_W; }
+EXPORT const uint16_t* nes_index_colors() {
+  Nes_Emu* e = shown_emu();
+  if (!e) return index_colors;
+  const Nes_Emu::frame_t& f = e->frame();
+  for (int i = 0; i < 256; i++) index_colors[i] = (uint16_t)(f.palette[i] & 511);
+  return index_colors;
+}
+
+// ---- Run-ahead with a second instance (native build) ----
+// The look-ahead frames run on a second Nes_Emu that shares the cartridge
+// (so Game Genie patches apply to both): each shown frame it loads the real
+// instance's state and runs ahead from there. The real instance never goes
+// back in time, so its sound synthesis stays continuous (restoring a snapshot
+// into it would desynchronise the band-limited sound buffer: garbled audio and
+// a growing hum).
+static Nes_Emu* emu2 = 0;
+static Nes_Buffer buffer2;
+static Nes_State* ra_state = 0;
+static int16_t mono2[MAX_SAMPLES];
+static void runahead_close() { if (last_video == emu2) last_video = 0; delete emu2; emu2 = 0; delete ra_state; ra_state = 0; video_emu = 0; }
+// Runs `ahead` frames from the current state on the second instance with the
+// given input and converts the last one; returns 0, or -1 on failure.
+EXPORT int nes_runahead(int pad1, int pad2, int ahead) {
+  if (!emu || ahead <= 0) return -1;
+  if (!emu2) {
+    emu2 = new (std::nothrow) Nes_Emu;
+    ra_state = new (std::nothrow) Nes_State;
+    if (!emu2 || !ra_state || emu2->set_sample_rate(SAMPLE_RATE, &buffer2) || (emu2->set_palette_range(0), emu2->set_pixels(index_buffer, BUF_W), emu2->set_cart(emu->cart()))) {
+      runahead_close(); return -1;
+    }
+  }
+  emu->save_state(ra_state);
+  emu2->load_state(*ra_state);
+  for (int i = 0; i < ahead; i++) {
+    const char* err = i == ahead - 1 ? emu2->emulate_frame(pad1, pad2) : emu2->emulate_skip_frame(pad1, pad2);
+    emu2->read_samples(mono2, MAX_SAMPLES);
+    if (err) return -1;
+  }
+  convert_pending = 0;
+  video_emu = emu2; convert(); video_emu = 0; note_video(emu2);
+  prev_valid = false;  // next primary conversion compares against a different frame
+  return 0;
+}
+// Clears queued sound and the resampler after a jump in time (rewind, state load).
+EXPORT void nes_audio_reset() {
+  nes_buffer.clear(); audio_fill = 0; rs_pos = 0; rs_last = 0; lp_state = 0;
+}
+
+// Native front end: the shown picture as NES colour numbers (incl. emphasis),
+// one per pixel (W x visible height), and power-on (QuickNES needs none).
+static uint16_t color_frame[WIDTH * HEIGHT];
+EXPORT const uint16_t* nes_color_frame() {
+  const uint8_t* idx = nes_indices();
+  if (!idx) return color_frame;
+  const uint16_t* map = nes_index_colors();
+  for (int y = 0; y < HEIGHT - 2 * crop_top; y++)
+    for (int x = 0; x < WIDTH; x++) color_frame[y * WIDTH + x] = map[idx[y * BUF_W + x]];
+  return color_frame;
+}
+EXPORT void nes_power() {}

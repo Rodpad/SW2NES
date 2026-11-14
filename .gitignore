@@ -10,3 +10,9 @@ __pycache__/
 # Never commit game ROMs
 *.nes
 *.fds
+# hbmenu build output (sw2nes.nro is published as a release asset)
+hbmenu/build/
+hbmenu/*.nro
+hbmenu/*.nacp
+hbmenu/*.elf
+*.o

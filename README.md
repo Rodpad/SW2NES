@@ -1,38 +1,50 @@
 # SW2NES
 
-A NES emulator for the Nintendo Switch 2, packaged as a `.civapp` for
-[CivHomebrew](https://github.com/XITRIX/CivHomebrew). It runs the
-[QuickNES](https://github.com/libretro/QuickNES_Core) core inside
-CivHomebrew's browser engine, which runs JavaScript only (no JIT,
-WebAssembly or WebGL). The whole emulator is therefore compiled to plain
-JavaScript, and the hottest parts are hand-written JavaScript.
+A NES emulator for the Nintendo Switch 2, running as a homebrew app from
+**hbmenu** under [kaiHEN](https://github.com/ouncebrew/kaihen). It is native
+code (C++ with OpenGL ES), built with devkitPro and the Switch 2 devkit
+([ounce-devkit](https://github.com/ouncebrew/ounce-devkit)).
+
+Two emulation cores are included: **Nestopia UE** (accurate, supports nearly
+every mapper; the default) and **QuickNES** (fast and light).
 
 No game ROMs are included or provided.
 
+> SW2NES started as an app for the CivHomebrew launcher. That version (1.1.1)
+> is no longer maintained; its source is kept in `legacy/civhomebrew/`.
+
 ## Features
 
-- Runs on CivHomebrew's native Launcher (SDK native UI 1.3.6 or newer)
-- Locked 60 fps, display-synchronised presentation and integer scaling
-- Two players (a second controller is detected automatically)
-- 4 save-state slots per game, optional auto-load of the latest state, battery saves
-- Per-game or global settings
-- Aspect ratio (1:1, 8:7, 4:3, Stretch), Integer/Fit scaling, overscan crop
-- CRT filters aligned to the pixel grid: scanlines (soft/normal/bold), aperture grille, scanlines + grille, LCD matrix, screen door
-- Colour palettes generated from an NTSC composite decode (Default, Vivid, Natural, Warm, Soft, Greyscale)
-- Face button remapping with turbo (10/15/20/30 Hz)
+- Nestopia UE or QuickNES core, switchable in Settings
+- Low input latency: one frame in flight, run-ahead (1–2 frames), frame delay at 60 Hz
+- 120 Hz / VRR on the Switch 2 screen, where the game is shown at the NES's own
+  60.1 Hz rate (the display mode is read from the system; 60 Hz elsewhere)
+- Rewind (hold ZL) and fast-forward (hold or toggle ZR)
+- GPU shaders: CRT-Royale (lite), CRT-Geom, CRT-Lottes, CRT-Easymode, CRT-Aperture,
+  zfast CRT, LCD grid, Scale2x, sharp bilinear, bilinear
+- NTSC signal simulation (composite, composite with dot crawl, S-Video)
+- Curvature, rounded corners, vignette and brightness boost
+- Aspect ratio (1:1, 8:7, 4:3, Stretch), integer or fit scaling, overscan
+- Colour palettes, volume and audio filter
+- 4 save-state slots per game, battery saves, optional auto-load of the latest state
+- Two players, with separate button mapping and turbo for each
 - Game Genie codes (on-screen editor, or a `.gg` text file next to the ROM)
-- Volume and audio low-pass filter
-- Favourites and recently played lists
-- Stats overlay with frame-time graph
+- Favourites, recently played and time played per game
+- Zipped ROMs (`.zip` with a `.nes` inside)
+- Per-game or global settings; advanced options can be hidden
 
 ## Installing
 
-1. In CivHomebrew, enable the FTP server.
-2. Upload `sw2nes.civapp` (from a release, or built yourself) into the `Install civapp` folder. CivHomebrew installs it automatically.
-3. Upload your `.nes` files into `Root/nes`.
-4. Launch **SW2NES** from CivHomebrew.
+1. Set up kaiHEN on your Switch 2 so that hbmenu runs.
+2. Copy `sw2nes.nro` from the [latest release](https://github.com/Rodpad/SW2NES/releases/latest)
+   to `/switch/sw2nes/sw2nes.nro` on the SD card.
+3. Copy your games (`.nes` or `.zip`) to `/roms/nes` on the SD card. SW2NES
+   creates this folder on its first launch. A different folder can be chosen in
+   Settings > ROM folder.
+4. Launch **SW2NES** from hbmenu.
 
-Game Genie codes can also be uploaded as `Root/nes/<game name>.gg`, one code per
+Settings, saves and play time are kept in `/switch/sw2nes/` on the SD card.
+Game Genie codes can also be put next to a game as `<game name>.gg`, one code per
 line with an optional description, for example `SXIOPO Infinite lives`.
 
 ## Controls
@@ -42,56 +54,48 @@ line with an optional description, for example `SXIOPO Infinite lives`.
 | D-pad / left stick | D-pad |
 | A, B | NES A (default) |
 | X, Y | NES B (default) |
-| + / - | Start / Select |
+| + / − | Start / Select |
 | L + R | In-game menu (press again to close) |
+| ZL (hold) | Rewind |
+| ZR | Fast-forward |
 
-All face buttons can be remapped in Settings, including turbo.
+Face buttons can be remapped per player in Settings, including turbo.
 
 ## Building
 
-Requirements: [Emscripten](https://emscripten.org/) 3.1.74 (via emsdk), Python 3 and Node.js.
+Requirements: [devkitPro pacman](https://devkitpro.org/wiki/devkitPro_pacman) with
+`switch-dev`, `switch-freetype` and `switch-zlib`, and the Switch 2 devkit
+(`sh install.sh` from ounce-devkit).
 
 ```sh
-# Emulator runtime (QuickNES + bridge, compiled to plain JavaScript)
-EMSDK=/path/to/emsdk ALIGN_LOWERING=1 tools/build.sh
-# Package the app
-python3 tools/package_payload.py --directory . --non-interactive --release 1.1.0 -o dist/sw2nes.civapp
+export DEVKITPRO=/opt/devkitpro
+make -C hbmenu
 ```
 
-`tools/build.sh` regenerates `native/cpu_lib.js` (the JavaScript 6502 core) from
-`tools/gen_cpu.py`. Build options are described at the top of the script.
+This builds `hbmenu/sw2nes.nro`.
 
 ## Layout
 
 | Path | Contents |
 | --- | --- |
-| `app/sw2nes.js` | The app: game list, settings, menus, game loop, video/audio output |
-| `app/native.js` | Console access through CivHomebrew: files, controllers, AudioOut |
-| `app/vendor/` | CivHomebrew SDK native UI runtime (the native Launcher draws the app and its game frames through it) |
-| `native/bridge.cpp` | C interface between QuickNES and the app (frames, audio, states, palettes) |
-| `native/*_lib.js` | Hand-written JavaScript for the 6502 CPU, pixel conversion and background rendering |
-| `tools/` | Build, packaging, CPU generator, icon generator |
-| `bench/` | Tests and benchmarks: browser previews (`preview*.html`), console mock, differential tests |
-| `third_party/QuickNES_Core` | QuickNES with SW2NES patches (marked `SW2NES_`) |
-
-## Testing
-
-```sh
-# Reference build (C CPU) and differential test: the JavaScript core must match
-EMSDK=/path/to/emsdk ALIGN_LOWERING=1 JS_CPU=0 OUT_NAME=ref.js tools/build.sh
-node bench/diff.cjs dist/runtime/ref.js dist/runtime/quicknes.js 20000 path/to/roms/*.nes
-
-# UI tests in headless Chrome (browser preview and console mock)
-node bench/ui-test.mjs /tmp/shots preview.html
-node bench/ui-test.mjs /tmp/shots preview-native.html
-```
-
-The browser previews need a ROM at `bench/test.nes`, which is not included.
+| `hbmenu/source/` | The app: menus, settings, game loop, video (OpenGL ES), audio, input |
+| `hbmenu/romfs/shaders/` | Picture shaders (GLSL ES) and the NTSC decoder |
+| `native/bridge.cpp` | C interface to QuickNES (frames, audio, states, palettes) |
+| `native/bridge_nestopia.cpp` | The same interface for Nestopia UE |
+| `third_party/QuickNES_Core` | QuickNES, with SW2NES patches (marked `SW2NES_`) |
+| `third_party/nestopia` | Nestopia UE core (from libretro/nestopia, see `SOURCE.txt`) |
+| `licenses/` | Licences of the bundled components (also inside the app) |
+| `legacy/civhomebrew/` | The former CivHomebrew version (1.1.1, unmaintained) |
 
 ## Licence
 
 SW2NES is free software under the GNU General Public License v3 or later (see
-`LICENSE`). It includes QuickNES (by Shay Green / blargg; libretro QuickNES_Core,
-LGPL 2.1 or later) and the CivHomebrew SDK native UI runtime
-(`app/vendor/native-ui-runtime.js`, civapps-native-ui 1.3.6, GPL-3.0-or-later; its
-notices are in `app/vendor/civapps-native-ui-NOTICE.txt`).
+`LICENSE`). It includes:
+
+- Nestopia UE, GPL-2.0-or-later
+- QuickNES (Shay Green / blargg; libretro QuickNES_Core), LGPL-2.1-or-later
+- Roboto (Apache 2.0) and Source Code Pro (SIL OFL 1.1) fonts
+- libounce and libnx (ISC), libkaihen (ISC), OunceVK / Mesa (MIT), mimalloc (MIT),
+  FreeType (FTL), HarfBuzz (MIT), libpng, zlib, minizip (zlib licence) and bzip2
+
+Their licence texts are in `licenses/`.

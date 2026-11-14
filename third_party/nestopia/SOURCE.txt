@@ -1,0 +1,1 @@
+Nestopia UE (libretro/nestopia) commit f1e02d12664834536edbf7352995a3d0cd1caef4, Sat Oct 31 00:50:01 2026 -0400
