@@ -1186,7 +1186,7 @@ static void drawBrowser() {
         float tw = gfx::textWidth(tag, 14) + 16;
         float tagX = rx + rw - 12 - TIME_W - tw;
         tagW += tw + 12;
-        if (fav) gfx::rect(tagX, ry + 9, tagW, 22, gfx::rgb(0xf2c94c), 4);
+        if (fav) gfx::rect(tagX, ry + 9, tw, 22, gfx::rgb(0xf2c94c), 4);
         textMid(tag, tagX + 8, ry + 9, 22, 14, fav ? gfx::rgb(0x1a1300) : col(C_DIM));
       }
       textMid(gfx::ellipsize(stripNes(r.name), rw - 32 - tagW, 20), rx + 16, ry, ROW_H, 20, col(C_TEXT));
