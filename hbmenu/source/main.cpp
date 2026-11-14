@@ -1120,6 +1120,7 @@ static void scrollbar(float x, float y, float h, int total, int vis, int topInde
 
 /* ---------------- Screens ---------------- */
 static const vector<string> BROWSER_BUTTONS = {"Settings", "Refresh", "Exit"};
+static const char* BROWSER_KEYS[] = {"Y", "X", "B"};  // gamepad shortcut for each button
 static const int ROW_H = 40;
 static const float LIST_HEAD = 26;  // column headings above the game list
 static int maxRows() { return std::max(3, (int)((gfx::UI_H * 0.9 - 36 - 38 - 44 - 12 - 30 - 14 - LIST_HEAD) / ROW_H)); }
@@ -1158,11 +1159,15 @@ static void drawBrowser() {
   }
   cy += 36 + 10;
   // Column headings
-  const float TIME_W = 150;  // "Time played" column, right of the tags
+  // Columns from the right: Time played, Recent, Favourite (centred tags).
+  const float TIME_W = 150, REC_W = 100, FAV_W = 110;
+  const float colR = cx + listInnerW - 18, recC = colR - TIME_W - REC_W / 2, favC = recC - REC_W / 2 - FAV_W / 2;
   if (!roms.empty()) {
     gfx::text("Game", cx + 22, cy + 1, 14, col(C_DIM), gfx::BOLD);
     float hw = gfx::textWidth("Time played", 14, gfx::BOLD);
-    gfx::text("Time played", cx + listInnerW - 18 - hw, cy + 1, 14, col(C_DIM), gfx::BOLD);
+    gfx::text("Time played", colR - hw, cy + 1, 14, col(C_DIM), gfx::BOLD);
+    gfx::text("Recent", recC - gfx::textWidth("Recent", 14, gfx::BOLD) / 2, cy + 1, 14, col(C_DIM), gfx::BOLD);
+    gfx::text("Favourite", favC - gfx::textWidth("Favourite", 14, gfx::BOLD) / 2, cy + 1, 14, col(C_DIM), gfx::BOLD);
     cy += head;
   }
   // List
@@ -1177,19 +1182,20 @@ static void drawBrowser() {
       float ry = cy + 6 + i * ROW_H, rx = cx + 6, rw = listInnerW - 12;
       bool active = top + i == selected && focusArea == "list";
       if (active) { gfx::rect(rx, ry, rw, ROW_H, col(C_SEL), 6); gfx::rect(rx, ry, 4, ROW_H, col(C_ACCENT), 2); }
-      bool fav = contains(favourites, r.name), rec = !fav && contains(recentGames, r.name);
+      bool fav = contains(favourites, r.name), rec = contains(recentGames, r.name);
       string played = playLabel(r.name);
       if (!played.empty()) { float pw = gfx::textWidth(played, 16); textMid(played, rx + rw - 12 - pw, ry, ROW_H, 16, col(C_DIM)); }
-      float tagW = TIME_W;
-      if (fav || rec) {
-        string tag = fav ? "Favourite" : "Recent";
-        float tw = gfx::textWidth(tag, 14) + 16;
-        float tagX = rx + rw - 12 - TIME_W - tw;
-        tagW += tw + 12;
-        if (fav) gfx::rect(tagX, ry + 9, tw, 22, gfx::rgb(0xf2c94c), 4);
-        textMid(tag, tagX + 8, ry + 9, 22, 14, fav ? gfx::rgb(0x1a1300) : col(C_DIM));
+      if (fav) {
+        float tw = gfx::textWidth("Favourite", 14) + 16;
+        gfx::rect(favC - tw / 2, ry + 9, tw, 22, gfx::rgb(0xf2c94c), 4);
+        textMid("Favourite", favC - tw / 2 + 8, ry + 9, 22, 14, gfx::rgb(0x1a1300));
       }
-      textMid(gfx::ellipsize(stripNes(r.name), rw - 32 - tagW, 20), rx + 16, ry, ROW_H, 20, col(C_TEXT));
+      if (rec) {
+        float tw = gfx::textWidth("Recent", 14) + 16;
+        gfx::rect(recC - tw / 2, ry + 9, tw, 22, Color{0, 0, 0, 0}, 4, 1, col(C_LINE));
+        textMid("Recent", recC - tw / 2 + 8, ry + 9, 22, 14, col(C_DIM));
+      }
+      textMid(gfx::ellipsize(stripNes(r.name), favC - FAV_W / 2 - rx - 28, 20), rx + 16, ry, ROW_H, 20, col(C_TEXT));
     }
     gfx::noClip();
     scrollbar(cx + listInnerW + 8, cy, listH, (int)roms.size(), VIS, top);
@@ -1202,8 +1208,11 @@ static void drawBrowser() {
     float bx = cx + 5 + i * (bw + 10);
     string label = i == 2 && exitArmed ? "Confirm exit" : BROWSER_BUTTONS[i];
     gfx::rect(bx, cy, bw, 40, col(on ? C_SEL : C_BG), 8, 1, col(on ? C_ACCENT : C_LINE));
-    float tw = gfx::textWidth(label, 18);
-    textMid(label, bx + (bw - tw) / 2, cy, 40, 18, col(i == 2 && exitArmed ? C_ACCENT : C_TEXT));
+    float tw = gfx::textWidth(label, 18), kw = 24, lx = bx + (bw - tw - kw - 8) / 2;
+    gfx::rect(lx, cy + 8, kw, kw, col(C_LINE), kw / 2);  // shortcut button badge
+    float kt = gfx::textWidth(BROWSER_KEYS[i], 15);
+    textMid(BROWSER_KEYS[i], lx + (kw - kt) / 2, cy + 8, kw, 15, col(C_TEXT));
+    textMid(label, lx + kw + 8, cy, 40, 18, col(i == 2 && exitArmed ? C_ACCENT : C_TEXT));
   }
   gfx::text("v" APP_VERSION, x + winW - padX - gfx::textWidth("v" APP_VERSION, 14), y + padY + 10, 14, col(C_DIM));
 }
@@ -1532,6 +1541,16 @@ static void handleUi(u64 bits) {
   u64 pressed = ev.pressed;
   double t = nowMs();
   if (mode == "browser") {
+    // L/ZL and R/ZR cycle the All/Favourites/Recent tabs from anywhere.
+    int tabStep = ((pressed & (B_R | HidNpadButton_ZR)) ? 1 : 0) - ((pressed & (B_L | HidNpadButton_ZL)) ? 1 : 0);
+    if (tabStep) {
+      int n = (int)LIST_VIEWS.size();
+      listView = (listView + tabStep + n) % n; roms.clear(); orderRoms(); selected = 0;
+      if (focusArea == "list" && roms.empty()) focusArea = "tabs";
+    }
+    // Y / X: the Settings and Refresh buttons (B is Exit, below).
+    if (pressed & B_Y) { exitArmed = 0; mode = "settings"; settingsIndex = 0; settingsTop = 0; return; }
+    if (pressed & B_X) { exitArmed = 0; scan(); showToast("List refreshed"); return; }
     if (exitArmed && (t > exitArmed || (pressed & ~(u64)(B_A | B_B)) || ev.up || ev.down || focusArea != "buttons" || btnIndex != 2)) exitArmed = 0;
     int VIS = std::max(1, std::min((int)roms.size(), maxRows()));
     if (focusArea == "tabs") {
