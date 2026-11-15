@@ -15,31 +15,17 @@ No game ROMs are included or provided.
 
 ## Installing
 
-### What you need
+1. Set up kaiHEN on your Switch 2 so that hbmenu runs.
+2. Copy `sw2nes.nro` from the [latest release](https://github.com/Rodpad/SW2NES/releases/latest)
+   to `/switch/sw2nes/sw2nes.nro` on the SD card.
+3. Copy your games (`.nes` or `.zip`) to `/roms/nes` on the SD card. SW2NES
+   creates this folder on its first launch. A different folder can be chosen in
+   Settings > ROM folder.
+4. Launch **SW2NES** from hbmenu.
 
-- A Nintendo Switch 2 with [kaiHEN](https://github.com/ouncebrew/kaihen) set up, so
-  that the homebrew menu (**hbmenu**) runs.
-- A way to copy files to the console's SD card: take the card out and use a card
-  reader, or use an FTP server on the console (OunceShell's FTP server works).
-- Your own game files (`.nes`, or `.zip` files with a `.nes` inside). No games are included.
-
-### Steps
-
-1. Download `sw2nes.nro` from the
-   [latest release](https://github.com/Rodpad/SW2NES/releases/latest).
-2. On the SD card, create the folder `/switch/sw2nes/` and copy `sw2nes.nro` into it,
-   so the file is at `/switch/sw2nes/sw2nes.nro`.
-3. Copy your games to `/roms/nes` on the SD card (create the folder if it is not
-   there; SW2NES also creates it on its first launch). Games in subfolders are not listed;
-   a different folder can be chosen later in Settings > ROM folder.
-4. Put the card back (or close the FTP connection), start hbmenu through kaiHEN
-   and launch **SW2NES**.
-
-Over FTP, the upload can be done from a computer's terminal, for example:
-
-```sh
-curl --ftp-create-dirs -T sw2nes.nro ftp://<console IP>:<port>/switch/sw2nes/sw2nes.nro
-```
+Settings, saves and play time are kept in `/switch/sw2nes/` on the SD card.
+Game Genie codes can also be put next to a game as `<game name>.gg`, one code per
+line with an optional description, for example `SXIOPO Infinite lives`.
 
 ### Updating
 
@@ -47,19 +33,6 @@ Replace `/switch/sw2nes/sw2nes.nro` with the one from the newest release. Settin
 saves, save states and play time are kept in `/switch/sw2nes/` and are not touched
 by an update. (Close SW2NES on the console before uploading over FTP; a running
 app's file cannot be replaced.)
-
-### Where things are kept
-
-| Path on the SD card | Contents |
-| --- | --- |
-| `/switch/sw2nes/sw2nes.nro` | The app |
-| `/switch/sw2nes/settings.json` | Settings, favourites and recently played |
-| `/switch/sw2nes/playtime.json` | Time played per game |
-| `/switch/sw2nes/*.srm`, `*.state*` | Battery saves and save states |
-| `/roms/nes` | Your games (default folder) |
-
-Game Genie codes can also be put next to a game as `<game name>.gg`, one code per
-line with an optional description, for example `SXIOPO Infinite lives`.
 
 ## Features
 
