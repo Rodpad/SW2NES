@@ -51,6 +51,11 @@ app's file cannot be replaced.)
 - Two players, with separate button mapping and turbo for each
 - Game list with All / Favourites / Recent tabs, search, sorting (name, last played, date added),
   Last Played dates and time played; games are found in subfolders of the ROM folder too
+- Box art and game details, downloaded on the console (no account needed) from the LaunchBox
+  Games Database, matched by the ROM's checksum (No-Intro). A details panel beside the game list shows the
+  box in 3D (drag to turn it), the publisher, year, genre and description (Settings > App >
+  Game details panel; Download missing info)
+- Themes: Dark, Light, Black, Blue, Purple, Red, Green, Orange, Retro and Retro Colour
 - Touch on every screen (tap, hold to highlight, drag to scroll), with an on-screen Menu button
   during play; UI size Normal (larger, easier to tap) or Compact
 - Button remapping screen per player (all games, or one game), including turbo and stick directions
@@ -116,6 +121,8 @@ SW2NES is free software under the GNU General Public License v3 or later (see
 - Roboto (Apache 2.0) and Source Code Pro (SIL OFL 1.1) fonts
 - libounce and libnx (ISC), libkaihen (ISC), OunceVK / Mesa (MIT), mimalloc (MIT),
   FreeType (FTL), HarfBuzz (MIT), libpng, zlib, minizip (zlib licence) and bzip2
+- curl (curl licence), Mbed TLS (Apache 2.0), stb_image (MIT / public domain) and the
+  Mozilla CA certificates (MPL 2.0), for downloading box art and game details
 
 - Date formats from the Unicode CLDR (Unicode licence)
 

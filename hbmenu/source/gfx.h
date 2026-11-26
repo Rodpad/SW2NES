@@ -78,5 +78,17 @@ Image* imageCreate(int w, int h);
 void imageUpload(Image* im, const uint32_t* rgba);
 void imageDraw(Image* im, float x, float y, float w, float h, float alpha = 1.0f);
 void imageDestroy(Image* im);
+// A smooth-scaled image (mipmapped), for art shown at any size.
+Image* imageCreateSmooth(int w, int h, const uint32_t* rgba);
+int imageWidth(Image* im);
+int imageHeight(Image* im);
+
+// A box in 3D: a cuboid with `front` on its front face (frontW x frontH UI units, depth deep), seen
+// in perspective with its centre at (cx, cy), turned yawDeg around the vertical and pitchDeg
+// around the horizontal. The other faces are `side`; all faces are lit from the upper left.
+// front may be null (all faces `side`).
+// back and spine (both long sides) may be null: those faces are `side` then. A spine image lying on its
+// side (wider than tall) is turned to run up the box.
+void box3D(Image* front, Image* back, Image* spine, float cx, float cy, float frontW, float frontH, float depth, float yawDeg, float pitchDeg, Color side);
 
 }  // namespace gfx

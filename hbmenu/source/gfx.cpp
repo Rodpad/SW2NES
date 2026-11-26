@@ -1,6 +1,7 @@
 // SW2NES native front end: OpenGL ES 3 drawing (rects, text, game picture).
 #include "gfx.h"
 
+#include <algorithm>
 #include <math.h>
 #include <EGL/egl.h>
 #include <GLES3/gl3.h>
@@ -426,6 +427,101 @@ void imageDraw(Image* im, float x, float y, float w, float h, float alpha) {
   quad(x, y, w, h, 0, 0, 1, 1);
 }
 void imageDestroy(Image* im) { if (im) { glDeleteTextures(1, &im->tex); delete im; } }
+Image* imageCreateSmooth(int w, int h, const uint32_t* rgba) {
+  Image* im = new Image();
+  im->w = w; im->h = h; glGenTextures(1, &im->tex);
+  glBindTexture(GL_TEXTURE_2D, im->tex);
+  glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, rgba);
+  glGenerateMipmap(GL_TEXTURE_2D);
+  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
+  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+  return im;
+}
+int imageWidth(Image* im) { return im ? im->w : 0; }
+int imageHeight(Image* im) { return im ? im->h : 0; }
+
+/* ---------------- 3D box ---------------- */
+// Vertices in clip space (x, y, z, w) worked out here, so the GPU interpolates the art with true
+// perspective; only the faces turned towards the viewer are drawn (no depth buffer needed).
+static GLuint boxProg = 0, boxVao = 0, boxVbo = 0;
+static GLint bTex, bUseTex, bColor, bShade;
+static const char* BOX_VS =
+    "#version 300 es\n"
+    "layout(location=0) in vec4 pos; layout(location=1) in vec2 uv; out vec2 vUv;\n"
+    "void main() { vUv = uv; gl_Position = pos; }\n";
+static const char* BOX_FS =
+    "#version 300 es\nprecision highp float;\n"
+    "in vec2 vUv; uniform sampler2D tex; uniform int useTex; uniform vec4 color; uniform float shade; out vec4 o;\n"
+    "void main() { vec4 c = useTex == 1 ? texture(tex, vUv) : color; o = vec4(c.rgb * shade, c.a); }\n";
+static void boxInit() {
+  std::string err;
+  boxProg = program(BOX_VS, BOX_FS, err);
+  bTex = glGetUniformLocation(boxProg, "tex"); bUseTex = glGetUniformLocation(boxProg, "useTex");
+  bColor = glGetUniformLocation(boxProg, "color"); bShade = glGetUniformLocation(boxProg, "shade");
+  glGenVertexArrays(1, &boxVao); glBindVertexArray(boxVao);
+  glGenBuffers(1, &boxVbo); glBindBuffer(GL_ARRAY_BUFFER, boxVbo);
+  glVertexAttribPointer(0, 4, GL_FLOAT, GL_FALSE, 24, (void*)0);
+  glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, 24, (void*)16);
+  glEnableVertexAttribArray(0); glEnableVertexAttribArray(1);
+  glBindVertexArray(vao);
+}
+void box3D(Image* front, Image* back, Image* spine, float cx, float cy, float frontW, float frontH, float depth, float yawDeg, float pitchDeg, Color side) {
+  if (!boxProg) boxInit();
+  const float W = frontW / 2, H = frontH / 2, D = depth / 2;
+  const float yaw = yawDeg * 3.14159265f / 180, pitch = pitchDeg * 3.14159265f / 180;
+  const float cyw = cosf(yaw), syw = sinf(yaw), cp = cosf(pitch), sp = sinf(pitch);
+  const float dist = std::max(frontW, frontH) * 3.2f;  // the eye: a mild perspective
+  struct V { float x, y, z; };
+  auto turn = [&](V v) {  // yaw around y, then pitch around x
+    V a{v.x * cyw + v.z * syw, v.y, -v.x * syw + v.z * cyw};
+    return V{a.x, a.y * cp - a.z * sp, a.y * sp + a.z * cp};
+  };
+  auto clipOf = [&](V v, float* out) {  // UI units around (cx, cy), y down -> clip space
+    const float k = dist / (dist - v.z);
+    const float sx = (cx + v.x * k) * UI_SCALE, sy = (cy + v.y * k) * UI_SCALE;
+    const float w = (dist - v.z) / dist;
+    out[0] = (sx / SCREEN_W * 2 - 1) * w; out[1] = (1 - sy / SCREEN_H * 2) * w; out[2] = 0; out[3] = w;
+  };
+  // faces: corners (counter-clockwise seen from outside), normal, textured?
+  struct Face { V c[4]; V n; Image* img; float dim; bool spine; };
+  const Face faces[6] = {
+      {{{-W, -H, D}, {W, -H, D}, {W, H, D}, {-W, H, D}}, {0, 0, 1}, front, 1.0f, false},      // front (y down)
+      {{{W, -H, -D}, {-W, -H, -D}, {-W, H, -D}, {W, H, -D}}, {0, 0, -1}, back, 0.95f, false},  // back (read from behind)
+      {{{W, -H, D}, {W, -H, -D}, {W, H, -D}, {W, H, D}}, {1, 0, 0}, spine, 1.0f, true},       // right
+      {{{-W, -H, -D}, {-W, -H, D}, {-W, H, D}, {-W, H, -D}}, {-1, 0, 0}, spine, 1.0f, true},   // left (the spine)
+      {{{-W, -H, -D}, {W, -H, -D}, {W, -H, D}, {-W, -H, D}}, {0, -1, 0}, nullptr, 1.0f, false},  // top
+      {{{-W, H, D}, {W, H, D}, {W, H, -D}, {-W, H, -D}}, {0, 1, 0}, nullptr, 0.9f, false}};      // bottom
+  V light{-0.45f, -0.55f, 0.70f};
+  { const float l = sqrtf(light.x * light.x + light.y * light.y + light.z * light.z); light = V{light.x / l, light.y / l, light.z / l}; }
+  glUseProgram(boxProg); glBindVertexArray(boxVao); glBindBuffer(GL_ARRAY_BUFFER, boxVbo);
+  glActiveTexture(GL_TEXTURE0); glUniform1i(bTex, 0);
+  for (const Face& f : faces) {
+    const V n = turn(f.n);
+    V c0 = turn(f.c[0]);
+    // facing the eye (at z = dist): the vector from the face to the eye against its normal
+    if ((0 - c0.x) * n.x + (0 - c0.y) * n.y + (dist - c0.z) * n.z <= 0) continue;
+    const float lit = 0.5f + 0.5f * std::max(0.0f, n.x * light.x + n.y * light.y + n.z * light.z);
+    float q[4][6];
+    static const float UV[4][2] = {{0, 0}, {1, 0}, {1, 1}, {0, 1}};
+    // a spine image lying on its side runs up the box: turned a quarter
+    static const float UV_TURNED[4][2] = {{0, 1}, {0, 0}, {1, 0}, {1, 1}};
+    const bool turned = f.spine && f.img && f.img->w > f.img->h;
+    for (int k = 0; k < 4; k++) { clipOf(turn(f.c[k]), q[k]); q[k][4] = turned ? UV_TURNED[k][0] : UV[k][0]; q[k][5] = turned ? UV_TURNED[k][1] : UV[k][1]; }
+    const float tri[6][6] = {{q[0][0], q[0][1], q[0][2], q[0][3], q[0][4], q[0][5]}, {q[1][0], q[1][1], q[1][2], q[1][3], q[1][4], q[1][5]},
+                             {q[2][0], q[2][1], q[2][2], q[2][3], q[2][4], q[2][5]}, {q[0][0], q[0][1], q[0][2], q[0][3], q[0][4], q[0][5]},
+                             {q[2][0], q[2][1], q[2][2], q[2][3], q[2][4], q[2][5]}, {q[3][0], q[3][1], q[3][2], q[3][3], q[3][4], q[3][5]}};
+    const bool useTex = f.img != nullptr;
+    glUniform1i(bUseTex, useTex ? 1 : 0);
+    glUniform4f(bColor, side.r, side.g, side.b, side.a);
+    glUniform1f(bShade, lit * f.dim);
+    if (useTex) glBindTexture(GL_TEXTURE_2D, f.img->tex);
+    glBufferData(GL_ARRAY_BUFFER, sizeof tri, tri, GL_STREAM_DRAW);
+    glDrawArrays(GL_TRIANGLES, 0, 6);
+  }
+  glBindVertexArray(vao); glBindBuffer(GL_ARRAY_BUFFER, vbo);
+}
 
 /* ---------------- Setup ---------------- */
 bool init(std::string& error) {

@@ -24,6 +24,9 @@ static const CoreApi* C = &QUICKNES_CORE;
 #include "crt.h"
 #include "gfx.h"
 #include "json.h"
+#include "boxart.h"
+extern "C" unsigned char* stbi_load(const char* filename, int* x, int* y, int* comp, int req_comp);
+extern "C" void stbi_image_free(void* retval_from_stbi_load);
 #include <minizip/unzip.h>
 
 #ifndef APP_VERSION
@@ -46,7 +49,31 @@ enum { B_A = 1, B_B = 2, B_X = 4, B_Y = 8, B_L = 64, B_R = 128, B_PLUS = 1024, B
        B_LEFT = 4096, B_UP = 8192, B_RIGHT = 16384, B_DOWN = 32768, B_SL = 65536, B_SU = 131072, B_SR = 262144, B_SD = 524288 };
 enum { N_A = 1, N_B = 2, N_SELECT = 4, N_START = 8, N_UP = 16, N_DOWN = 32, N_LEFT = 64, N_RIGHT = 128 };
 
-static const uint32_t C_BG = 0x0b0d12, C_PANEL = 0x151924, C_LINE = 0x2a3142, C_TEXT = 0xeef1f7, C_DIM = 0x9aa3b5, C_ACCENT = 0xe4463b, C_SEL = 0x2b3550;
+// Colours: set by the theme (Settings -> App -> Theme).
+static uint32_t C_BG = 0x0b0d12, C_PANEL = 0x151924, C_LINE = 0x2a3142, C_TEXT = 0xeef1f7, C_DIM = 0x9aa3b5, C_ACCENT = 0xe4463b, C_SEL = 0x2b3550;
+struct Theme { const char* name; uint32_t bg, panel, line, text, dim, accent, sel; uint32_t faceA = 0, faceB = 0, faceX = 0, faceY = 0; };  // face: button-icon colours (0: the usual)
+static const Theme THEMES[] = {
+    {"Dark", 0x0b0d12, 0x151924, 0x2a3142, 0xeef1f7, 0x9aa3b5, 0xe4463b, 0x2b3550},
+    {"Light", 0xe6e9ef, 0xf7f8fa, 0xc5ccd8, 0x1b1f27, 0x566072, 0xd2382c, 0xd9e0ec},
+    {"Black", 0x000000, 0x0a0a0c, 0x26262c, 0xf2f2f4, 0x9a9aa3, 0xe4463b, 0x1c1c22},
+    {"Blue", 0x0a1020, 0x101a30, 0x22345a, 0xeaf0ff, 0x9fb0d6, 0x3d8bff, 0x1c2d52},
+    {"Purple", 0x110b1c, 0x1b1229, 0x372652, 0xf1ecfa, 0xb2a4cf, 0xa66bff, 0x2e2148},
+    {"Red", 0x160a0b, 0x221113, 0x47242a, 0xfaeeee, 0xd0a5a8, 0xff4d4d, 0x3d1c21},
+    {"Green", 0x08130d, 0x0f1f15, 0x21402c, 0xeaf8ef, 0x9fcab0, 0x3ccf6e, 0x173a24},
+    {"Orange", 0x140e08, 0x21170d, 0x47331d, 0xfcf3ea, 0xd3b79c, 0xff8c2a, 0x3d2a16},
+    // Retro: the grey of the 16-bit console's case, charcoal text, its purple buttons as the accent
+    {"Retro", 0x1f1e23, 0x34333a, 0x6a6971, 0xffffff, 0xdcdbe2, 0xb4a6ff, 0x4a4073, 0x6650c8, 0x6650c8, 0xb3a5ef, 0xb3a5ef},
+    // Retro Colour: the same greys, with the four coloured face buttons of the PAL and Japanese pads
+    {"Retro Colour", 0x1f1e23, 0x34333a, 0x6a6971, 0xffffff, 0xdcdbe2, 0xe0463e, 0x4a3a3c, 0xe0463e, 0xf2c230, 0x3f6fe0, 0x3caa55}};
+static const int THEME_COUNT = (int)(sizeof THEMES / sizeof THEMES[0]);
+static int themeIndex = 0;
+static uint32_t C_FACE[4] = {0, 0, 0, 0};  // A, B, X, Y icon colours of the theme (0: the usual)
+static void applyTheme(int i) {
+  themeIndex = i >= 0 && i < THEME_COUNT ? i : 0;
+  const Theme& t = THEMES[themeIndex];
+  C_FACE[0] = t.faceA; C_FACE[1] = t.faceB; C_FACE[2] = t.faceX; C_FACE[3] = t.faceY;
+  C_BG = t.bg; C_PANEL = t.panel; C_LINE = t.line; C_TEXT = t.text; C_DIM = t.dim; C_ACCENT = t.accent; C_SEL = t.sel;
+}
 static Color col(uint32_t c, float a = 1) { return gfx::rgb(c, a); }
 
 static const vector<string> ASPECTS = {"1:1", "8:7", "4:3", "Stretch"}, SCALES = {"Integer", "Fit"}, CROPS = {"Show all", "Hide sides", "Hide all edges"};
@@ -150,6 +177,7 @@ static const char* switchButtonName(int bit) {
 static bool debugLog = false;
 // Touch always works (taps and drags on every screen). "UI size" (Settings -> App): Compact, or
 // Normal with taller rows and larger row text (easier to tap).
+static bool detailsPanel = true;  // the game list's box art and description panel (Settings -> App)
 static bool touchControls = true;  // UI size: Normal (the default) or Compact  // the larger spacing
 // The in-game on-screen Menu button (Settings -> App): 0 when the game is touched (3 s), 1 always, 2 hidden.
 static int menuButtonMode = 0;
@@ -168,10 +196,13 @@ static float barW() { return touchControls ? 14 : 8; }      // the scroll bar
 // A drag scrolls the page (as on a phone), leaving the selection where it is; the next button
 // press brings the view back to the selection.
 static bool touchScrolled = false;
-struct Hit { float x, y, w, h; std::function<void()> tap; std::function<void(int)> drag; };  // drag: rows moved (+ down)
+struct Hit { float x, y, w, h; std::function<void()> tap; std::function<void(int)> drag; std::function<void(float, float)> move; };  // drag: rows moved (+ down); move: follows the finger (UI units per frame)
 static std::vector<Hit> hits;  // registered while drawing; the next frame's touches use them
 static void addHit(float x, float y, float w, float h, std::function<void()> tap, std::function<void(int)> drag = nullptr) {
-  hits.push_back(Hit{x, y, w, h, std::move(tap), std::move(drag)});
+  hits.push_back(Hit{x, y, w, h, std::move(tap), std::move(drag), nullptr});
+}
+static void addMoveHit(float x, float y, float w, float h, std::function<void(float, float)> move) {
+  hits.push_back(Hit{x, y, w, h, nullptr, nullptr, std::move(move)});
 }
 // The finger now (UI units): what it is on lights up while held; a tap acts on release.
 static bool touchIsDown = false, touchDragging = false;
@@ -347,7 +378,7 @@ static Json settingsJson(const GameVals& g) {
   j.set("romSortByView", sorts); j.set("playHistory", strings(playHistory));
   j.set("lastPlayedDates", lastPlayedDates);
   j.set("romDir", Json::string(romDir));
-  j.set("advanced", Json::boolean(showAdvanced)); j.set("debugLog", Json::boolean(debugLog)); j.set("touch", Json::boolean(touchControls)); j.set("menuButton", Json::number(menuButtonMode));
+  j.set("advanced", Json::boolean(showAdvanced)); j.set("debugLog", Json::boolean(debugLog)); j.set("touch", Json::boolean(touchControls)); j.set("menuButton", Json::number(menuButtonMode)); j.set("detailsPanel", Json::boolean(detailsPanel)); j.set("theme", Json::number(themeIndex));
   for (int pl = 0; pl < 2; pl++) { Json m = Json::array(); for (int i = 0; i < NPAD; i++) m.a.push_back(Json::number(padMap[pl][i])); j.set("padMap" + std::to_string(pl + 1), m); }
   {
     Json g = Json::object();
@@ -420,6 +451,8 @@ static void applySettingsJson(const Json& v) {
   if (const Json* d = v.get("debugLog")) if (d->isBool()) debugLog = d->b;
   if (const Json* d = v.get("touch")) if (d->isBool()) touchControls = d->b;
   menuButtonMode = pick(v.get("menuButton"), MENU_BUTTON_MODES.size(), menuButtonMode);
+  if (const Json* d = v.get("detailsPanel")) if (d->isBool()) detailsPanel = d->b;
+  applyTheme(pick(v.get("theme"), THEME_COUNT, themeIndex));
   ROW_H = touchControls ? 72 : 40;
   if (const Json* r = v.get("romDir")) if (r->isStr() && !r->s.empty()) romDir = r->s;
   coreSel = pick(v.get("core"), CORES.size(), coreSel);
@@ -638,6 +671,88 @@ static int headIndex = -1;  // the header row: -1 the current tab, then (tabs = 
 static double footFlashUntil = 0, footActAt = 0;
 // A button press flashes first, then acts; a tap acts at once (it was lit while the finger was on it).
 static void pressFooter(int i) { footFlash = footPending = i; footFlashUntil = nowMs() + 140; footActAt = tapThisFrame ? 0 : footFlashUntil; }
+// ---- Box art (boxart.h): found on the console, shown on a 3D box beside the game list ----
+static boxart::System artSystem() {
+  boxart::System s;
+  s.dbName = "Nintendo - Nintendo Entertainment System";
+  s.repo = "Nintendo_-_Nintendo_Entertainment_System";
+  s.lbPlatform = "Nintendo Entertainment System";
+  s.dataDir = DATA_DIR;
+  s.crcRange = nullptr;  // No-Intro's NES entries are the whole .nes file, header included
+  return s;
+}
+static bool readRom(const Rom& rom, vector<uint8_t>& data, string& err);
+// The box art run's progress: "3 / 10 · Sparkster"; the database step as a percentage.
+static string boxArtProgress() {
+  auto& b = boxart::status();
+  if (b.phase == 1 || b.phase == 2) {
+    const int pc = b.phase == 2 ? 100 : b.sizeMB > 0 ? std::min(99, b.gotMB * 100 / b.sizeMB) : 0;
+    return "Preparing the game database: " + std::to_string(pc) + "%";
+  }
+  string t = std::to_string(std::min(b.total.load(), b.done.load() + 1)) + " / " + std::to_string(b.total.load());
+  if (b.current[0]) t += string("  \u00b7  ") + b.current;  // the title being looked up
+  return t;
+}
+static int boxArtRow = 0;  // which download row started the run (its row shows the progress): 0 missing, 1 all again, 2 test
+static void startBoxArt(bool again, int limit = 0) {
+  boxArtRow = limit ? 2 : again ? 1 : 0;
+  vector<boxart::Game> games;
+  for (auto& r : allRoms) games.push_back(boxart::Game{r.name, r.dir + "/" + r.name});
+  std::stable_sort(games.begin(), games.end(), [](const boxart::Game& a, const boxart::Game& b) { return naturalLess(stripNes(a.name), stripNes(b.name)); });  // A-Z
+  std::map<string, string> dirOf; for (auto& r : allRoms) dirOf[r.name] = r.dir;
+  auto read = [dirOf](const boxart::Game& g, std::vector<uint8_t>& out) { auto it = dirOf.find(g.name); string err; return it != dirOf.end() && readRom(Rom{g.name, it->second}, out, err); };
+  static bool logSet = false;
+  if (!logSet) { boxart::setLog([](const char* l) { record("%s", l); }); logSet = true; }
+  if (boxart::start(artSystem(), games, again, read, limit)) showToast("Looking for box art...", 2500);
+  else if (!boxart::status().message.empty()) showToast(boxart::status().message, 4000);
+}
+struct ArtTex {
+  gfx::Image* img = nullptr; gfx::Image* back = nullptr; gfx::Image* spineImg = nullptr;  // box front, back, spine
+  gfx::Image* snap = nullptr;  // a gameplay screenshot
+  Color spine{0.2f, 0.2f, 0.25f, 1}; bool tried = false;
+  bool hasInfo = false; string title, line, line2, bio, source;  // details (boxart::infoPath): publisher; year and genre
+};
+static std::map<string, ArtTex> artCache;
+// An image file (JPEG or PNG) as a texture; px gets its pixels (RGBA) when asked.
+static gfx::Image* loadArtImage(const string& path, vector<uint32_t>* px = nullptr, int* w = nullptr, int* h = nullptr) {
+  int iw = 0, ih = 0, n = 0;
+  unsigned char* d = stbi_load(path.c_str(), &iw, &ih, &n, 4);
+  if (!d) return nullptr;
+  gfx::Image* im = gfx::imageCreateSmooth(iw, ih, (const uint32_t*)d);
+  if (px) px->assign((const uint32_t*)d, (const uint32_t*)d + (size_t)iw * ih);
+  if (w) *w = iw;
+  if (h) *h = ih;
+  stbi_image_free(d);
+  return im;
+}
+static ArtTex& artFor(const string& name) {
+  ArtTex& a = artCache[name];
+  if (a.tried) return a;
+  a.tried = true;
+  {  // details
+    string t; Json j;
+    if (readText(boxart::infoPath(artSystem(), name), t) && Json::parse(t, j) && j.type == Json::OBJ) {
+      auto str = [&](const char* k) { const Json* v = j.get(k); return v && v->isStr() ? v->s : string(); };
+      a.hasInfo = true; a.title = str("title"); a.bio = str("bio"); a.source = str("source");
+      a.line = !str("publisher").empty() ? str("publisher") : str("developer");
+      for (const string& part : {str("year"), str("genre")}) if (!part.empty()) a.line2 += (a.line2.empty() ? "" : "  \u00b7  ") + part;
+    }
+  }
+  vector<uint32_t> px; int w = 0, h = 0;
+  a.img = loadArtImage(boxart::artPath(artSystem(), name), &px, &w, &h);
+  if (!a.img) { record("art: %s: no art", name.c_str()); return a; }
+  a.back = loadArtImage(boxart::backPath(artSystem(), name));
+  a.spineImg = loadArtImage(boxart::spinePath(artSystem(), name));
+  record("art: %s: %dx%d front%s%s", name.c_str(), w, h, a.back ? ", back" : "", a.spineImg ? ", spine" : "");
+  // the top and bottom: the front's left edge, averaged and darkened
+  double r = 0, g = 0, b = 0; const int edge = std::max(1, w / 30);
+  for (int y = 0; y < h; y++) for (int x = 0; x < edge; x++) { const uint32_t p = px[y * w + x]; r += p & 255; g += (p >> 8) & 255; b += (p >> 16) & 255; }
+  const double n = (double)h * edge * 255;
+  a.spine = Color{(float)(r / n * 0.8), (float)(g / n * 0.8), (float)(b / n * 0.8), 1};
+  return a;
+}
+// A box's depth against its front's height, by region (real boxes measured roughly).
+static float boxDepthRatio(const string& region) { return region == "jp" ? 0.18f : 0.24f; }
 static void openSearch() {
   SwkbdConfig kbd;
   if (R_FAILED(swkbdCreate(&kbd, 0))) { showToast("The keyboard could not open"); return; }
@@ -1457,6 +1572,12 @@ static vector<SettingItem> settingsItems() {
         if (debugLog && !logFile) { openLog(); record("SW2NES %s: debug logging turned on", APP_VERSION); }
         else if (!debugLog && logFile) { fclose(logFile); logFile = nullptr; }
       }},
+      {"Theme", [] { vector<string> v; for (const Theme& t : THEMES) v.push_back(t.name); return v; }, [] { return themeIndex; }, [](int v) { applyTheme(v); }},
+      {"Game details panel", [] { return OFF_ON; }, [] { return detailsPanel ? 1 : 0; }, [](int v) { detailsPanel = v != 0; }},
+      {"Download missing info", [] { return vector<string>{boxart::status().running && boxArtRow == 0 ? boxArtProgress() : string("Press {A}")}; }, [] { return 0; },
+       [](int) { if (settingsByA && !boxart::status().running) { artCache.clear(); startBoxArt(false); } }},
+      {"Download all info again", [] { return vector<string>{boxart::status().running && boxArtRow == 1 ? boxArtProgress() : string("Press {A}")}; }, [] { return 0; },
+       [](int) { if (settingsByA && !boxart::status().running) { artCache.clear(); startBoxArt(true); } }},
       {"On-screen Menu button", [] { return MENU_BUTTON_MODES; }, [] { return menuButtonMode; }, [](int v) { menuButtonMode = v; }},
       {"UI size", [] { return vector<string>{"Compact", "Normal"}; }, [] { return touchControls ? 1 : 0; }, [](int v) { touchControls = v != 0; ROW_H = touchControls ? 72 : 40; }},
       {"Pair controllers", [] { return vector<string>{"Press {A}"}; }, [] { return 0; }, [](int) { if (settingsByA) pairControllers(); }},
@@ -1682,7 +1803,8 @@ static bool drawTabBack(float rowX, float rowW, float cy, bool focus, std::funct
 }
 // Game rows that fit: the screen less the window's padding, the header row, the column headings,
 // the footer and the list's own padding.
-static int maxRows() { return std::max(3, (int)((gfx::UI_H * 0.96 - 36 - tabRowH() - 10 - LIST_HEAD - 12 - (btnH() + 14) - 12) / ROW_H)); }
+static const float SCREEN_MARGIN = 24;  // the game list's window fills the screen but for this margin
+static int maxRows() { return std::max(3, (int)((gfx::UI_H - 2 * SCREEN_MARGIN - 36 - tabRowH() - 10 - LIST_HEAD - 12 - (btnH() + 14) - 12) / ROW_H)); }
 
 // The game list: title; tabs | search field, sort (what you see); the list; a footer of button
 // legends (what you do), each also a touch button. Every control keeps one size and place.
@@ -1702,6 +1824,162 @@ static vector<float> footerWidths() {  // every footer button one width: that of
   const float w = legendWidth({"Play", "Favourite", "Search", "Settings", "Refresh", "Exit", "Confirm exit"});
   return vector<float>(6, w);
 }
+static float bioScroll = 0, bioScrollMax = 0, artYaw = 0, artPitch = 0;  // the panel: description scroll, the box's turn (by touch)
+static double artSince = 0;  // when this game was highlighted (the box's swing starts from the centre)
+static double artTouchedAt = 0;  // the last time a finger turned the box (let go: it eases back)
+static string artPanelGame;
+static void drawArtPanel(float x, float y, float w, float h, const Rom* rom) {
+  gfx::rect(x, y, w, h, col(C_BG), 10, 1, col(C_LINE));
+  if (!rom) return;
+  if (artPanelGame != rom->name) { artPanelGame = rom->name; bioScroll = 0; artYaw = artPitch = 0; artSince = nowMs(); }  // a new game: from the top, unturned
+  ArtTex& a = artFor(rom->name);
+  // the box: high in the panel; drag on it to turn it any way
+  const float boxH = std::min(h * 0.54f, w * 1.0f), pad = 16;
+  float boxCY = y + boxH * 0.5f, boxBottom = y + 60;  // (set from the box's own size below)
+  // where the title and details go: under the box, or beside a tall box (its description then full width below both)
+  float detX = x + pad, detW = w - 2 * pad, detTop = -1, boxCX = x + w / 2, boxHitW = w;
+  if (a.img) {
+    // one box shape for every game (its art stretched the little it differs), so nothing moves between games:
+    // a landscape box for art wider than tall (the SNES's own boxes), a portrait one otherwise
+    const float artAspect = (float)gfx::imageWidth(a.img) / gfx::imageHeight(a.img);
+    const float aspect = artAspect >= 1 ? 1.37f : 0.72f;
+    float fw = w * 0.7f, fh = fw / aspect;
+    if (fh > boxH * 0.82f) { fh = boxH * 0.82f; fw = fh * aspect; }
+    // close to the panel's top (the slight tilt and perspective need a little room above and below)
+    boxCY = y + 10 + fh * 0.56f + fh * 0.10f;  // (shifted down by a tenth of the box)
+    boxBottom = boxCY + fh * 0.56f;
+    if (aspect < 1) {  // a tall box (NES, PS2): in the top left, the details beside it
+      fw = w * 0.42f; fh = fw / aspect;
+      if (fh > h * 0.5f) { fh = h * 0.5f; fw = fh * aspect; }
+      boxCX = x + pad + fw * 0.62f;  // (room for its swing)
+      boxCY = y + 12 + fh * 0.56f;
+      boxBottom = boxCY + fh * 0.56f;
+      boxHitW = fw * 1.25f + pad;
+      detX = x + pad + fw * 1.25f + 10; detW = x + w - pad - detX; detTop = y + 18;
+    }
+    {  // let go: ease back to the normal swing (the shortest way round)
+      static double last = 0; const double now = nowMs(), dt = last ? std::min(0.1, (now - last) / 1000.0) : 0; last = now;
+      if (!(touchIsDown && now - artTouchedAt < 150)) {
+        artYaw = fmodf(artYaw, 360); if (artYaw > 180) artYaw -= 360; if (artYaw < -180) artYaw += 360;
+        artPitch = fmodf(artPitch, 360); if (artPitch > 180) artPitch -= 360; if (artPitch < -180) artPitch += 360;
+        const float k = (float)exp(-dt * 8);  // about half a second
+        artYaw *= k; artPitch *= k;
+        if (fabsf(artYaw) < 0.05f) artYaw = 0;
+        if (fabsf(artPitch) < 0.05f) artPitch = 0;
+      }
+    }
+    // an even, slow swing left and right, from facing straight ahead when the game is highlighted
+    const float swing = 32 * sinf((float)((nowMs() - artSince) / 1000.0) * 0.55f);
+    const float yaw = swing + artYaw, pitch = 6 + artPitch;
+    // for now (until the ScreenScraper sides): the front's art on a black box
+    gfx::clip((int)x + 2, (int)y + 2, (int)w - 4, (int)h - 4);  // never past the panel's border, however it is turned
+    gfx::box3D(a.img, nullptr, nullptr, boxCX, boxCY, fw, fh, fh * boxDepthRatio(boxart::region(rom->name)), yaw, pitch, Color{0, 0, 0, 1});  // pure black
+    gfx::noClip();
+    addMoveHit(x, y, boxHitW, std::max(boxH, boxBottom - y), [](float dx, float dy) { artYaw += dx * 0.6f; artPitch -= dy * 0.6f; artTouchedAt = nowMs(); });
+  } else {
+    const string msg = boxart::status().running ? boxArtProgress() : a.hasInfo ? "No box art found" : "";
+    if (!a.hasInfo && !boxart::status().running) {  // nothing at all yet: say where to get it
+      float my = y + 20;
+      for (auto& l : wrap("No box art or description. Go to Settings to download missing info.", w - 2 * 16, 17)) { gfx::text(l, x + 16, my, 17, col(C_DIM)); my += 24; }
+      return;
+    }
+    textMid(msg, x + (w - gfx::textWidth(msg, 16)) / 2, y + 20, 22, 16, col(C_DIM));
+  }
+  // the details: title, developer / year / genre, the description (it scrolls: touch, or the right stick)
+  const bool beside = detTop >= 0;  // a tall box: the details beside it (then a screenshot), the description below
+  const bool flow = false; const float off = 0;
+  float ty = beside ? detTop : boxBottom + 10;  // the details: beside a tall box, otherwise straight under the box
+  const float tw = w - 2 * pad, bottom = y + h - pad;
+  const string title = a.hasInfo && !a.title.empty() ? a.title : stripNes(rom->name);
+  // the year and the genre: one line ("1995  ·  RPG"), or, beside a tall box, each on its own line
+  vector<string> line2s;
+  if (!a.line2.empty()) {
+    if (!beside) line2s.push_back(a.line2);
+    else { const string sep = "  \u00b7  "; size_t p = 0, q; while ((q = a.line2.find(sep, p)) != string::npos) { line2s.push_back(a.line2.substr(p, q - p)); p = q + sep.size(); } line2s.push_back(a.line2.substr(p)); }
+  }
+  if (beside) {  // beside a tall box: the box's back at the top, the details underneath ending level with the box's bottom
+    const float boxTop = boxCY - (boxBottom - boxCY);
+    const float faceTop = boxTop + (boxBottom - boxTop) * 0.05f, faceBottom = boxBottom - (boxBottom - boxTop) * 0.05f;  // its front face (not the tilt)
+    float detH = wrap(title, detW, 22, gfx::BOLD).size() * 28.0f;
+    if (!a.line.empty()) detH += wrap(a.line, detW, 17).size() * 24.0f;
+    for (const string& l2 : line2s) detH += wrap(l2, detW, 17).size() * 24.0f;
+    // the back and the details under it, as one block centred on the box
+    float bw = 0, bh = 0;
+    if (a.back) {  // the column's full width, smaller only if the block would be taller than the box
+      const float ba = (float)gfx::imageWidth(a.back) / gfx::imageHeight(a.back);
+      const float room = faceBottom - faceTop - detH - 10;
+      bw = detW; bh = bw / ba;
+      if (bh > room) { bh = std::max(0.0f, room); bw = bh * ba; }
+      if (bh <= 30) bw = bh = 0;
+    }
+    const float blockH = (bh > 0 ? bh + 10 : 0) + detH;
+    float top = std::max(y + 12, boxCY - blockH / 2);
+    if (bh > 0) { gfx::imageDraw(a.back, detX, top, bw, bh); top += bh + 10; }
+    ty = top;
+  }
+  for (auto& l : wrap(title, detW, 22, gfx::BOLD)) { if (ty + 28 > bottom) break; gfx::text(l, detX, ty, 22, col(C_TEXT), gfx::BOLD); ty += 28; }
+  if (!a.line.empty()) for (auto& l : wrap(a.line, detW, 17)) { if (ty + 24 > bottom) break; gfx::text(l, detX, ty + 2, 17, col(C_TEXT)); ty += 24; }
+  for (const string& l2 : line2s) for (auto& l : wrap(l2, detW, 17)) { if (ty + 24 > bottom) break; gfx::text(l, detX, ty + 2, 17, col(C_TEXT)); ty += 24; }
+  if (beside) {  // under the details, beside the box: a gameplay screenshot, as large as fits; then the description below both
+    ty = std::max(ty, boxBottom + 4);
+  }
+  bioScrollMax = 0;
+  if (!a.hasInfo) {
+    for (auto& l : wrap("No description. Go to Settings to download missing info.", tw, 17)) { if (ty + 24 > bottom) break; gfx::text(l, x + pad, ty + 4, 17, col(C_DIM)); ty += 24; }
+    return;
+  }
+  if (a.bio.empty()) { if (ty + 24 <= bottom) gfx::text("No description found", x + pad, ty + 4, 17, col(C_DIM)); return; }
+  const float BIO = 18, LINE = 26;
+  // the description's lines: beside a tall box (its column) while level with it, then full width
+  struct BioLine { string text; bool last; float lx, lw, cy; };  // cy: where it sits, unscrolled
+  vector<BioLine> lines;
+  const float startY = ty + off + 6;  // (unscrolled)
+  float cyAt = startY;
+  auto widthAt = [&](float cy, float& lx) { if (flow && cy < boxBottom + 4) { lx = detX; return detW; } lx = x + pad; return tw - 10; };
+  {
+    size_t p = 0;
+    while (p <= a.bio.size()) {
+      size_t e = a.bio.find('\n', p); if (e == string::npos) e = a.bio.size();
+      const string para = a.bio.substr(p, e - p);
+      vector<string> ws; { size_t q = 0; while (q < para.size()) { size_t sp = para.find(' ', q); if (sp == string::npos) sp = para.size(); if (sp > q) ws.push_back(para.substr(q, sp - q)); q = sp + 1; } }
+      size_t k = 0;
+      if (ws.empty()) { cyAt += LINE; }
+      while (k < ws.size()) {
+        float lx; const float lw = widthAt(cyAt, lx);
+        string line = ws[k++];
+        while (k < ws.size() && gfx::textWidth(line + " " + ws[k], BIO) <= lw) line += " " + ws[k++];
+        lines.push_back(BioLine{line, k >= ws.size(), lx, lw, cyAt});
+        cyAt += LINE;
+      }
+      p = e + 1;
+    }
+  }
+  const float areaTop = flow ? y + 4 : ty + 6, areaBottom = y + h - pad;
+  const float areaH = areaBottom - areaTop;
+  if (areaH < LINE) return;
+  // scrolling: the description's end reaching the panel's bottom
+  bioScrollMax = flow ? std::max(0.0f, cyAt - areaBottom) : std::max(0.0f, cyAt - startY - areaH);
+  bioScroll = std::max(0.0f, std::min(bioScrollMax, bioScroll));
+  const float shift = flow ? bioScroll : (startY - areaTop) + bioScroll;  // content y -> screen y
+  gfx::clip((int)x, (int)areaTop, (int)w, (int)areaH);
+  for (const BioLine& L : lines) {
+    const float ly = L.cy - shift;
+    if (ly + LINE < areaTop || ly > areaBottom) continue;
+    vector<string> ws; { size_t q = 0; while (q < L.text.size()) { size_t sp = L.text.find(' ', q); if (sp == string::npos) sp = L.text.size(); if (sp > q) ws.push_back(L.text.substr(q, sp - q)); q = sp + 1; } }
+    float wordsW = 0; for (auto& wd : ws) wordsW += gfx::textWidth(wd, BIO);
+    const float gap = ws.size() > 1 ? (L.lw - wordsW) / (ws.size() - 1) : 0;
+    if (L.last || ws.size() < 2 || gap > BIO * 1.6f) { gfx::text(L.text, L.lx, ly, BIO, col(C_TEXT)); continue; }  // a paragraph's end, or too stretched: as it is
+    float wx = L.lx;
+    for (auto& wd : ws) { gfx::text(wd, wx, ly, BIO, col(C_TEXT)); wx += gfx::textWidth(wd, BIO) + gap; }
+  }
+  gfx::noClip();
+  if (bioScrollMax > 0) {  // how far through: a thin bar
+    const float contentH = bioScrollMax + areaH, bh = std::max(24.0f, areaH * areaH / contentH), by = areaTop + (areaH - bh) * (bioScroll / bioScrollMax);
+    gfx::rect(x + w - 8, areaTop, 3, areaH, col(C_LINE), 1.5f);
+    gfx::rect(x + w - 8, by, 3, bh, col(C_DIM), 1.5f);
+  }
+  if (!flow) addMoveHit(x, areaTop, w, areaH, [](float, float dy) { bioScroll -= dy; });  // touch: drag the text
+}
 static void drawBrowser() {
   const float padX = 20, padY = 18, gap = 12, divGap = 28;
   const float tabsW = tabsWidth(LIST_VIEWS), sortW = sortWidth();
@@ -1709,7 +1987,8 @@ static void drawBrowser() {
   float footW = 0; for (float w : fw) footW += w + 8;
   const float titleW = roundf(10 + 12 + gfx::textWidth("SW2NES", 26, gfx::BOLD) + 24);  // accent bar, title, space before the tabs
   const float headW = titleW + tabsW + divGap + SEARCH_MIN + gap + sortW;
-  const float winW = std::min((float)gfx::UI_W - 24, std::max({960.0f, headW + 2 * padX + 16, footW + 2 * padX + 16})), innerW = winW - 2 * padX;  // (+16: the scroll bar's gutter)
+  const float winW = gfx::UI_W - 2 * SCREEN_MARGIN, innerW = winW - 2 * padX;  // the whole screen, but for the margin
+  (void)headW; (void)footW;  // (+16: the scroll bar's gutter)
   int VIS = std::max(1, std::min((int)roms.size(), maxRows()));
   if (!touchScrolled) {
     if (selected < top) top = selected;
@@ -1726,10 +2005,13 @@ static void drawBrowser() {
     else empty = "No games found in\n\n    " + romDir + "\n\nCopy .nes (or zipped) games there, or into folders inside it, for example over FTP, then choose Refresh. The folder can be changed in Settings.";
   }
   float listInnerW = innerW - 16;  // the scrollbar's gutter always kept: the list never changes width
-  vector<string> emptyLines = empty.empty() ? vector<string>() : wrap(empty, listInnerW - 32, 17);
-  float listH = maxRows() * ROW_H + 12;
+  // The games on the left, the highlighted game's box art (on a 3D box) on the right.
+  const float ART_W = detailsPanel ? roundf(listInnerW * 0.36f) : 0, gridW = detailsPanel ? listInnerW - ART_W - 16 : listInnerW;
+  vector<string> emptyLines = empty.empty() ? vector<string>() : wrap(empty, gridW - 32, 17);
   float head = LIST_HEAD;
   const float footH = btnH() + 14;
+  // the list takes all the height left (the screen, but for the margin)
+  float listH = gfx::UI_H - 2 * SCREEN_MARGIN - (padY * 2 + tabRowH() + 10 + head + 12 + footH);
   float winH = padY * 2 + tabRowH() + 10 + head + listH + 12 + footH;
   float x = (gfx::UI_W - winW) / 2, y = roundf((gfx::UI_H - winH) / 2);
   gfx::rect(x, y, winW, winH, col(C_PANEL), 14, 1, col(C_LINE));
@@ -1777,7 +2059,8 @@ static void drawBrowser() {
   cy += tabRowH() + 10;
   // Columns from the right: Time Played, Last Played, Favourite.
   const float metadataW = 128;
-  const float timeC = cx + listInnerW - 18 - metadataW / 2;
+  const float inner = barW() + 8;  // the scroll bar, inside the list on its right
+  const float timeC = cx + gridW - inner - 18 - metadataW / 2;
   const float playedC = timeC - metadataW, favC = playedC - metadataW;
   if (!roms.empty()) {
     const string gameHead = searchQuery.empty() ? "Game (" + std::to_string(roms.size()) + ")" : "Game (" + std::to_string(roms.size()) + " matching)";
@@ -1787,19 +2070,19 @@ static void drawBrowser() {
     gfx::text("Favourite", favC - gfx::textWidth("Favourite", headText(), gfx::BOLD) / 2, cy + 1, headText(), col(C_DIM), gfx::BOLD);
   }
   cy += head;  // (kept with no games too: the window keeps its size)
-  gfx::rect(cx, cy, listInnerW, listH, col(C_BG), 10, 1, col(C_LINE));
+  gfx::rect(cx, cy, gridW, listH, col(C_BG), 10, 1, col(C_LINE));
   if (roms.empty()) {
     float ly = cy + 16;
     for (auto& l : emptyLines) { glyphText(l, cx + 16, ly, 17, col(C_TEXT)); ly += 17 * 1.45f; }
   } else {
-    addHit(cx, cy, listInnerW, listH, nullptr, [VIS](int rows) {  // drag: the page scrolls
+    addHit(cx, cy, gridW, listH, nullptr, [VIS](int rows) {  // drag: the page scrolls
       top = std::max(0, std::min(std::max(0, (int)roms.size() - VIS), top + rows)); touchScrolled = true;
     });
-    gfx::clip((int)cx, (int)cy, (int)listInnerW, (int)listH);
+    gfx::clip((int)cx, (int)cy, (int)gridW, (int)listH);
     for (int i = 0; i < VIS && top + i < (int)roms.size(); i++) {
       const Rom& r = roms[top + i];
-      float ry = cy + 6 + i * ROW_H, rx = cx + 6, rw = listInnerW - 12;
-      bool active = (top + i == selected && focusArea == "list") || touchHolding(cx + 6, cy + 6 + i * ROW_H, listInnerW - 12, ROW_H);
+      float ry = cy + 6 + i * ROW_H, rx = cx + 6, rw = gridW - 12 - inner;
+      bool active = (top + i == selected && focusArea == "list") || touchHolding(cx + 6, cy + 6 + i * ROW_H, gridW - 12 - inner, ROW_H);
       if (active) { gfx::rect(rx, ry, rw, ROW_H, col(C_SEL), 6); gfx::rect(rx, ry, 4, ROW_H, col(C_ACCENT), 2); }
       else if (top + i == selected && focusArea == "buttons") gfx::rect(rx, ry, 4, ROW_H, col(C_DIM), 2);  // the game Play / Favourite act on
       {  // tap: select, then start; the Favourite column toggles the mark
@@ -1819,11 +2102,27 @@ static void drawBrowser() {
       }
       const string& date = lastPlayedLabel(r.name);
       if (!date.empty()) textMid(date, playedC - gfx::textWidth(date, rowSmall()) / 2, ry, ROW_H, rowSmall(), col(C_DIM));
-      textMid(gfx::ellipsize(stripNes(r.name), favC - metadataW / 2 - rx - 28, rowText()), rx + 16, ry, ROW_H, rowText(), col(C_TEXT));
+      {  // the title: a long one on the highlighted row scrolls (after 2 s) to show the rest
+        const string title = stripNes(r.name);
+        const float avail = favC - metadataW / 2 - rx - 28, tw = gfx::textWidth(title, rowText());
+        static int marqueeRow = -1; static double marqueeSince = 0;
+        if (active && top + i != marqueeRow) { marqueeRow = top + i; marqueeSince = nowMs(); }
+        if (active && tw > avail) {
+          const double over = tw - avail, speed = 40;  // UI units per second
+          const double cycle = 2.0 + over / speed + 1.5;  // wait, scroll, rest at the end
+          const double at = fmod((nowMs() - marqueeSince) / 1000.0, cycle);
+          const float off = at < 2.0 ? 0 : (float)std::min(over, (at - 2.0) * speed);
+          gfx::clip((int)(rx + 16), (int)ry, (int)avail, (int)ROW_H);
+          textMid(title, rx + 16 - off, ry, ROW_H, rowText(), col(C_TEXT));
+          gfx::noClip();
+          gfx::clip((int)cx, (int)cy, (int)gridW, (int)listH);  // (the list's own clip again)
+        } else textMid(gfx::ellipsize(title, avail, rowText()), rx + 16, ry, ROW_H, rowText(), col(C_TEXT));
+      }
     }
     gfx::noClip();
-    scrollbar(cx + listInnerW + 8 - (barW() - 8) / 2, cy, listH, (int)roms.size(), VIS, top, &top);
+    scrollbar(cx + gridW - barW() - 6, cy + 6, listH - 12, (int)roms.size(), VIS, top, &top);
   }
+  if (detailsPanel) drawArtPanel(cx + gridW + 16, cy, ART_W, listH, selected < (int)roms.size() ? &roms[selected] : nullptr);
   cy += listH + 12;
   // Footer: button legends, right-aligned, each one place and one size
   gfx::rect(cx, cy - 2, listInnerW, 1, col(C_LINE));
@@ -1850,10 +2149,15 @@ static void drawBrowser() {
     gfx::rect(lx, ly, bw, btnH(), flash ? col(C_ACCENT) : focus || L.lit ? col(C_SEL) : col(C_BG), BTN_RADIUS, focus ? 2 : 1,
               col(flash || focus || L.lit ? C_ACCENT : C_LINE));
     const float kw = 30, kx = lx + (bw - (kw + 10 + gfx::textWidth(L.label, BTN_TEXT))) / 2, ky = ly + (btnH() - kw) / 2;
-    gfx::rect(kx, ky, kw, kw, col(dim ? C_LINE : C_DIM), kw / 2);
     const string k = L.key;
-    if (k[0] == '{' && singleJoyConConnected) drawFaceGlyph(glyphToken(k, 0), kx + (kw - glyphWidth(20)) / 2, ky + (kw - 20 * 1.25f) / 2, 20, col(C_PANEL));
-    else { const string t = k[0] == '{' ? string(1, k[1]) : k; textMid(t, kx + (kw - gfx::textWidth(t, 18, gfx::BOLD)) / 2, ky, kw, 18, col(C_PANEL), gfx::BOLD); }
+    // the theme's colour for this face button (Retro Colour), if it has one
+    const int fi = k == "{A}" ? 0 : k == "{B}" ? 1 : k == "{X}" ? 2 : k == "{Y}" ? 3 : -1;
+    const uint32_t face = fi >= 0 ? C_FACE[fi] : 0;
+    const float faceLum = face ? (0.299f * ((face >> 16) & 255) + 0.587f * ((face >> 8) & 255) + 0.114f * (face & 255)) / 255 : 0;
+    const gfx::Color keyInk = face ? (faceLum > 0.6f ? gfx::rgb(0x1e1b2a) : gfx::rgb(0xffffff)) : col(C_PANEL);  // dark letters on a light icon, white on a dark one
+    gfx::rect(kx, ky, kw, kw, face ? (dim ? gfx::rgb(face, 0.45f) : gfx::rgb(face)) : col(dim ? C_LINE : C_DIM), kw / 2);
+    if (k[0] == '{' && singleJoyConConnected) drawFaceGlyph(glyphToken(k, 0), kx + (kw - glyphWidth(20)) / 2, ky + (kw - 20 * 1.25f) / 2, 20, keyInk);
+    else { const string t = k[0] == '{' ? string(1, k[1]) : k; textMid(t, kx + (kw - gfx::textWidth(t, 18, gfx::BOLD)) / 2, ky, kw, 18, keyInk, gfx::BOLD); }
     textMid(L.label, kx + kw + 10, ly, btnH(), BTN_TEXT, flash ? col(C_PANEL) : col(dim ? C_DIM : L.lit ? C_ACCENT : C_TEXT));
     addHit(lx - g / 2, ly - 4, bw + g, btnH() + 8, L.tap);
   }
@@ -1894,7 +2198,7 @@ static void drawFolderPicker() {
     addHit(rx, ry, rw, rowH, [i] { if (pickSel == i) touchPress |= B_A; else pickSel = i; });
     string label; Color c = col(C_TEXT);
     int up = pickAtRoot() ? 0 : 1;
-    if (i == 0) { label = "Use this folder"; c = gfx::rgb(0x6ee26e); }
+    if (i == 0) { label = "Use this folder"; c = col(C_ACCENT); }
     else if (up && i == 1) label = ".. (up one level)";
     else label = pickDirs[i - 1 - up] + "/";
     textMid(gfx::ellipsize(label, rw - 32, touchControls ? 22 : 18), rx + 16, ry, rowH, touchControls ? 22 : 18, c, i == 0 ? gfx::BOLD : gfx::REGULAR);
@@ -1990,8 +2294,7 @@ static void drawSettings() {
       }
       const float vw = valueBox(ch[SETTINGS_ITEMS[i].get()], rx + rw - 12, ry, SET_ROW_H, rowText(), active);
       if (ch.size() > 1) {
-        addHit(rx + rw - 12 - vw - 10, ry, vw / 2 + 10, SET_ROW_H, [i] { settingsIndex = i; touchPress |= B_LEFT; });
-        addHit(rx + rw - 12 - vw / 2, ry, vw / 2 + 12, SET_ROW_H, [i] { settingsIndex = i; touchPress |= B_RIGHT; });
+        addHit(rx + rw - 12 - vw - 10, ry, vw + 22, SET_ROW_H, [i] { settingsIndex = i; touchPress |= B_RIGHT; });  // a tap: the next choice (a cycle)
       }
     } else textMid("Back", rx + 16, ry, SET_ROW_H, rowText(), col(C_TEXT));
   }
@@ -2072,8 +2375,7 @@ static void drawMenu() {
     addHit(rx, ry, rw, ROW_H, [i] { if (menuIndex == i) touchPress |= B_A; else menuIndex = i; });
     if (m.option()) {
       vector<string> ch = m.choices(); int v = m.get(); vw = valueBox(ch[std::max(0, std::min((int)ch.size() - 1, v))], rx + rw - 12, ry, ROW_H, rowText(), active) + 16;
-      addHit(rx + rw - 12 - vw - 4, ry, vw / 2 + 4, ROW_H, [i] { menuIndex = i; touchPress |= B_LEFT; });
-      addHit(rx + rw - 12 - vw / 2, ry, vw / 2 + 12, ROW_H, [i] { menuIndex = i; touchPress |= B_RIGHT; });
+      addHit(rx + rw - 12 - vw - 4, ry, vw + 16, ROW_H, [i] { menuIndex = i; touchPress |= B_RIGHT; });  // a tap: the next choice (a cycle)
     }
     textMid(gfx::ellipsize(m.label, rw - 28 - vw, rowText()), rx + 16, ry, ROW_H, rowText(), col(C_TEXT));
   }
@@ -2125,7 +2427,7 @@ static void drawToast() {
   if (!toastUntil) return;
   float w = glyphTextWidth(toastText, 20) + 36, h = 20 * LH + 20;
   float x = roundf((gfx::UI_W - w) / 2), y = gfx::UI_H - 28 - h;
-  gfx::rect(x, y, w, h, gfx::rgb(0x0a0c12, 0.85f), 8);
+  gfx::rect(x, y, w, h, col(C_PANEL, 0.96f), 8, 1, col(C_LINE));
   textMid(toastText, x + 18, y, h, 20, col(C_TEXT));
 }
 
@@ -2299,15 +2601,17 @@ static void touchUpdate() {
   const bool now = hidGetTouchScreenStates(&st, 1) && st.count > 0;
   const float x = now ? st.touches[0].x * (float)gfx::UI_W / 1280.0f : lx, y = now ? st.touches[0].y * (float)gfx::UI_H / 720.0f : ly;
   // the topmost hit under a point that taps (or drags)
-  auto hitAt = [](float px, float py, bool drag) { for (int i = (int)hits.size() - 1; i >= 0; i--) { const Hit& h = hits[i]; if ((drag ? (bool)h.drag : (bool)h.tap) && px >= h.x && px < h.x + h.w && py >= h.y && py < h.y + h.h) return i; } return -1; };
+  auto hitAt = [](float px, float py, bool drag) { for (int i = (int)hits.size() - 1; i >= 0; i--) { const Hit& h = hits[i]; if ((drag ? (bool)h.drag || (bool)h.move : (bool)h.tap) && px >= h.x && px < h.x + h.w && py >= h.y && py < h.y + h.h) return i; } return -1; };
   touchIsDown = now; touchX = x; touchY = y;
   if (now && !down) { touchStartX = x; touchStartY = y; }
   touchDragging = dragging || (now && down && (fabsf(x - sx) >= 20 || fabsf(y - sy) >= 20));
   if (now && !down && debugLog) record("touch: down at panel %u, %u (UI %.0f, %.0f)", st.touches[0].x, st.touches[0].y, x, y);
   if (now && !down) { down = true; dragging = false; sx = lx = x; sy = ly = y; acc = 0; dragHit = hitAt(x, y, true); }
   else if (now) {
-    if (!dragging && dragHit >= 0 && fabsf(y - sy) > 20) dragging = true;
-    if (dragging && dragHit >= 0 && dragHit < (int)hits.size()) {
+    if (!dragging && dragHit >= 0 && dragHit < (int)hits.size() && hits[dragHit].move && (fabsf(x - sx) > 8 || fabsf(y - sy) > 8)) dragging = true;
+    else if (!dragging && dragHit >= 0 && fabsf(y - sy) > 20) dragging = true;
+    if (dragging && dragHit >= 0 && dragHit < (int)hits.size() && hits[dragHit].move) hits[dragHit].move(x - lx, y - ly);
+    else if (dragging && dragHit >= 0 && dragHit < (int)hits.size()) {
       acc += y - ly;
       const int rows = (int)(acc / ROW_H);
       if (rows) { acc -= rows * ROW_H; hits[dragHit].drag(-rows); }
@@ -2327,6 +2631,8 @@ static void handleUi(u64 bits) {
   u64 pressed = ev.pressed;
   double t = nowMs();
   if (mode == "browser") {
+    if (bits & HidNpadButton_StickRDown) bioScroll += 6;   // the right stick scrolls the description
+    if (bits & HidNpadButton_StickRUp) bioScroll -= 6;
     if (footPending >= 0) {  // a footer button was used: its action runs when its flash has shown
       if (t < footActAt) return;
       const int i = footPending; footPending = -1;
@@ -2613,6 +2919,13 @@ int main(int argc, char** argv) {
     }
     double t = nowMs();
     hits.clear();  // drawing below registers this frame's touch targets
+    {  // box art: reload as it arrives; say how it went when the run ends
+      static bool artWasRunning = false; static int artSeen = 0;
+      auto& b = boxart::status();
+      if (b.running && b.found != artSeen) { artSeen = b.found; artCache.clear(); }
+      if (artWasRunning && !b.running) { artCache.clear(); artSeen = 0; showToast(b.message, 4000); }
+      artWasRunning = b.running;
+    }
     if (toastUntil && t > toastUntil) toastUntil = 0;
     if (hintUntil && t > hintUntil) hintUntil = 0;
     if (gameView != (running && (mode == "running" || mode == "menu" || mode == "ggedit" || mode == "remap"))) gfx::beginFrame(running ? gfx::Color{0, 0, 0, 1} : col(C_BG));
