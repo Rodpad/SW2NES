@@ -49,8 +49,13 @@ app's file cannot be replaced.)
 - Colour palettes, volume and audio filter
 - 4 save-state slots per game, battery saves, optional auto-load of the latest state
 - Two players, with separate button mapping and turbo for each
+- Game list with All / Favourites / Recent tabs, search, sorting (name, last played, date added),
+  Last Played dates and time played; games are found in subfolders of the ROM folder too
+- Touch on every screen (tap, hold to highlight, drag to scroll), with an on-screen Menu button
+  during play; UI size Normal (larger, easier to tap) or Compact
+- Button remapping screen per player (all games, or one game), including turbo and stick directions
+- Single Joy-Cons held sideways work as a controller, with position-based button hints
 - Game Genie codes (on-screen editor, or a `.gg` text file next to the ROM)
-- Favourites, recently played and time played per game
 - Zipped ROMs (`.zip` with a `.nes` inside)
 - Per-game or global settings; advanced options can be hidden
 
@@ -59,14 +64,21 @@ app's file cannot be replaced.)
 | Switch 2 | NES / app |
 | --- | --- |
 | D-pad / left stick | D-pad |
-| A, B | NES A (default) |
-| X, Y | NES B (default) |
+| B, X | NES A (default) |
+| A, Y | NES B (default) |
 | + / − | Start / Select |
-| L + R | In-game menu (press again to close) |
+| L + R + stick press | In-game menu (press again to close); SL + SR + stick press on a single Joy-Con |
 | ZL (hold) | Rewind |
 | ZR | Fast-forward |
 
-Face buttons can be remapped per player in Settings, including turbo.
+Buttons can be remapped per player in Settings > Sound & controls (or for one game from
+the in-game Controls tab), including turbo. A single Joy-Con held sideways: its bottom and top
+buttons are A, right and left B, + or − Start, SL Select and SR Start.
+
+In the game list: the header row has the tabs, a search field and the sort order (left / right
+to move, A to use); the footer has Play, Favourite (−), Search (+), Settings (Y), Refresh (X) and
+Exit (B, press twice). L / R or ZL / ZR switch tabs, and pressing the left stick changes the order.
+Everything can also be tapped.
 
 ## Building
 
@@ -104,5 +116,7 @@ SW2NES is free software under the GNU General Public License v3 or later (see
 - Roboto (Apache 2.0) and Source Code Pro (SIL OFL 1.1) fonts
 - libounce and libnx (ISC), libkaihen (ISC), OunceVK / Mesa (MIT), mimalloc (MIT),
   FreeType (FTL), HarfBuzz (MIT), libpng, zlib, minizip (zlib licence) and bzip2
+
+- Date formats from the Unicode CLDR (Unicode licence)
 
 Their licence texts are in `licenses/`.

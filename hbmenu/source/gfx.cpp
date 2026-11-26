@@ -1,6 +1,7 @@
 // SW2NES native front end: OpenGL ES 3 drawing (rects, text, game picture).
 #include "gfx.h"
 
+#include <math.h>
 #include <EGL/egl.h>
 #include <GLES3/gl3.h>
 #include <GLES2/gl2ext.h>
@@ -65,9 +66,10 @@ static const char* VS =
     "layout(location=0) in vec2 pos; layout(location=1) in vec2 uv;\n"
     "uniform vec2 screen; out vec2 vuv; out vec2 vpos;\n"
     "void main(){ vuv = uv; vpos = pos; gl_Position = vec4(pos.x / screen.x * 2.0 - 1.0, 1.0 - pos.y / screen.y * 2.0, 0.0, 1.0); }\n";
-// Rounded rectangle by signed distance, with an inner border.
+// Rounded rectangle by signed distance, with an inner border. highp: mediump is 16-bit on this GPU,
+// which resolves only whole pixels beyond x 1024, so edges on the right of the screen came out dashed.
 static const char* RECT_FS =
-    "#version 300 es\nprecision mediump float;\n"
+    "#version 300 es\nprecision highp float;\n"
     "in vec2 vpos; uniform vec4 rect; uniform float radius; uniform float border; uniform vec4 fill; uniform vec4 bcolor; out vec4 o;\n"
     "void main(){ vec2 c = rect.xy + rect.zw * 0.5; vec2 h = rect.zw * 0.5;\n"
     "  vec2 q = abs(vpos - c) - h + vec2(radius); float d = length(max(q, 0.0)) + min(max(q.x, q.y), 0.0) - radius;\n"
@@ -76,7 +78,7 @@ static const char* RECT_FS =
     "  o = vec4(col.rgb, col.a * a); }\n";
 // Textures: mode 0 = RGBA image (alpha scaled), 1 = text atlas (R = coverage, tinted).
 static const char* TEX_FS =
-    "#version 300 es\nprecision mediump float;\n"
+    "#version 300 es\nprecision highp float;\n"
     "in vec2 vuv; uniform sampler2D tex; uniform int mode; uniform vec4 color; out vec4 o;\n"
     "void main(){ vec4 t = texture(tex, vuv); if (mode == 1) o = vec4(color.rgb, color.a * t.r); else o = vec4(t.rgb, t.a * color.a); }\n";
 // Game picture: nearest texels; CRT strips give each screen row / column's
@@ -203,7 +205,12 @@ static void quad(float x, float y, float w, float h, float u0, float v0, float u
 
 void rect(float x, float y, float w, float h, Color fill, float radius, float border, Color bc) {
   if (w <= 0 || h <= 0) return;
-  x *= UI_SCALE; y *= UI_SCALE; w *= UI_SCALE; h *= UI_SCALE; radius *= UI_SCALE; border *= UI_SCALE;
+  // To whole screen pixels (the UI is drawn 1.25x): edges and borders that land between pixels
+  // come out soft or uneven, so every side is snapped and a border is a whole number of pixels.
+  const float x2 = roundf((x + w) * UI_SCALE), y2 = roundf((y + h) * UI_SCALE);
+  x = roundf(x * UI_SCALE); y = roundf(y * UI_SCALE); w = x2 - x; h = y2 - y;
+  if (w <= 0 || h <= 0) return;
+  radius *= UI_SCALE; border = border > 0 ? fmaxf(1.0f, roundf(border * UI_SCALE)) : 0;
   glUseProgram(rectProg); setScreen(rScreen);
   glUniform4f(rRect, x, y, w, h);
   float r = radius; if (r > w / 2) r = w / 2; if (r > h / 2) r = h / 2;
