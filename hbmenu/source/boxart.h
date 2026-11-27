@@ -64,5 +64,10 @@ bool artMissing(const System& sys, const std::string& gameName);
 // A game's region from its file name: "us", "eu" or "jp" (No-Intro "(USA)", "(Europe)", "(Japan)"
 // and GoodTools "(U)", "(E)", "(J)" and the like); "us" when nothing says.
 std::string region(const std::string& gameName);
+// The TV system for the details panel: "NTSC", "PAL", "NTSC-J" or "World" from a name's region
+// tags (No-Intro / Redump / GoodTools), "" when it has none.
+std::string tvSystem(const std::string& gameName);
+// The same from a PS2 disc serial's prefix (SLUS -> NTSC, SLES -> PAL, SLPS / SLPM -> NTSC-J).
+std::string tvSystemOfSerial(const std::string& serial);
 
 }  // namespace boxart

@@ -177,6 +177,7 @@ static const char* switchButtonName(int bit) {
 static bool debugLog = false;
 // Touch always works (taps and drags on every screen). "UI size" (Settings -> App): Compact, or
 // Normal with taller rows and larger row text (easier to tap).
+static bool gameTitles = true;  // the game list shows downloaded titles instead of file names (Settings -> App -> Game names)
 static bool detailsPanel = true;  // the game list's box art and description panel (Settings -> App)
 static bool touchControls = true;  // UI size: Normal (the default) or Compact  // the larger spacing
 // The in-game on-screen Menu button (Settings -> App): 0 when the game is touched (3 s), 1 always, 2 hidden.
@@ -378,7 +379,7 @@ static Json settingsJson(const GameVals& g) {
   j.set("romSortByView", sorts); j.set("playHistory", strings(playHistory));
   j.set("lastPlayedDates", lastPlayedDates);
   j.set("romDir", Json::string(romDir));
-  j.set("advanced", Json::boolean(showAdvanced)); j.set("debugLog", Json::boolean(debugLog)); j.set("touch", Json::boolean(touchControls)); j.set("menuButton", Json::number(menuButtonMode)); j.set("detailsPanel", Json::boolean(detailsPanel)); j.set("theme", Json::number(themeIndex));
+  j.set("advanced", Json::boolean(showAdvanced)); j.set("debugLog", Json::boolean(debugLog)); j.set("touch", Json::boolean(touchControls)); j.set("menuButton", Json::number(menuButtonMode)); j.set("detailsPanel", Json::boolean(detailsPanel)); j.set("gameTitles", Json::boolean(gameTitles)); j.set("theme", Json::number(themeIndex));
   for (int pl = 0; pl < 2; pl++) { Json m = Json::array(); for (int i = 0; i < NPAD; i++) m.a.push_back(Json::number(padMap[pl][i])); j.set("padMap" + std::to_string(pl + 1), m); }
   {
     Json g = Json::object();
@@ -452,6 +453,7 @@ static void applySettingsJson(const Json& v) {
   if (const Json* d = v.get("touch")) if (d->isBool()) touchControls = d->b;
   menuButtonMode = pick(v.get("menuButton"), MENU_BUTTON_MODES.size(), menuButtonMode);
   if (const Json* d = v.get("detailsPanel")) if (d->isBool()) detailsPanel = d->b;
+  if (const Json* d = v.get("gameTitles")) if (d->isBool()) gameTitles = d->b;
   applyTheme(pick(v.get("theme"), THEME_COUNT, themeIndex));
   ROW_H = touchControls ? 72 : 40;
   if (const Json* r = v.get("romDir")) if (r->isStr() && !r->s.empty()) romDir = r->s;
@@ -504,6 +506,7 @@ static bool naturalLess(const string& a0, const string& b0) {
   }
   return a.size() - i < b.size() - j;
 }
+static string displayName(const string& name);  // the title or the file name, as the list shows it
 static void orderRoms() {
   const int romSort = romSortByView[listView];
   string cur = selected < (int)roms.size() ? roms[selected].name : "";
@@ -544,14 +547,14 @@ static void orderRoms() {
         if ((a.added == 0) != (b.added == 0)) return a.added != 0;
         if (a.added != b.added) return romSort == AddedAsc ? a.added < b.added : a.added > b.added;
       }
-      const string an = stripNes(a.name), bn = stripNes(b.name);
+      const string an = displayName(a.name), bn = displayName(b.name);
       return romSort == NameDesc ? naturalLess(bn, an) : naturalLess(an, bn);
     });
   }
   if (!searchQuery.empty()) {
     const string q = lower(searchQuery);
     vector<Rom> kept;
-    for (auto& r : list) if (lower(stripNes(r.name)).find(q) != string::npos) kept.push_back(r);
+    for (auto& r : list) if (lower(displayName(r.name)).find(q) != string::npos || lower(stripNes(r.name)).find(q) != string::npos) kept.push_back(r);  // the title or the file name
     list = kept;
   }
   roms = list; selected = 0; top = 0;
@@ -681,6 +684,21 @@ static boxart::System artSystem() {
   s.crcRange = nullptr;  // No-Intro's NES entries are the whole .nes file, header included
   return s;
 }
+// Downloaded titles, by file name ("" when a game has none), read once from its details file.
+static std::map<string, string> titleCache;
+static string displayName(const string& name) {
+  if (gameTitles) {
+    auto it = titleCache.find(name);
+    if (it == titleCache.end()) {
+      string t, title; Json j;
+      if (readText(boxart::infoPath(artSystem(), name), t) && Json::parse(t, j) && j.type == Json::OBJ)
+        if (const Json* v = j.get("title")) if (v->isStr()) title = v->s;
+      it = titleCache.emplace(name, title).first;
+    }
+    if (!it->second.empty()) return it->second;
+  }
+  return stripNes(name);
+}
 static bool readRom(const Rom& rom, vector<uint8_t>& data, string& err);
 // The box art run's progress: "3 / 10 · Sparkster"; the database step as a percentage.
 static string boxArtProgress() {
@@ -735,7 +753,8 @@ static ArtTex& artFor(const string& name) {
       auto str = [&](const char* k) { const Json* v = j.get(k); return v && v->isStr() ? v->s : string(); };
       a.hasInfo = true; a.title = str("title"); a.bio = str("bio"); a.source = str("source");
       a.line = !str("publisher").empty() ? str("publisher") : str("developer");
-      for (const string& part : {str("year"), str("genre")}) if (!part.empty()) a.line2 += (a.line2.empty() ? "" : "  \u00b7  ") + part;
+      string tv = str("region"); if (tv.empty()) tv = boxart::tvSystem(name);  // (details downloaded before the region was saved: the file name's)
+      for (const string& part : {str("year"), str("genre"), tv}) if (!part.empty()) a.line2 += (a.line2.empty() ? "" : "  \u00b7  ") + part;
     }
   }
   vector<uint32_t> px; int w = 0, h = 0;
@@ -1574,6 +1593,7 @@ static vector<SettingItem> settingsItems() {
       }},
       {"Theme", [] { vector<string> v; for (const Theme& t : THEMES) v.push_back(t.name); return v; }, [] { return themeIndex; }, [](int v) { applyTheme(v); }},
       {"Game details panel", [] { return OFF_ON; }, [] { return detailsPanel ? 1 : 0; }, [](int v) { detailsPanel = v != 0; }},
+      {"Game names", [] { return vector<string>{"Title", "File name"}; }, [] { return gameTitles ? 0 : 1; }, [](int v) { gameTitles = v == 0; orderRoms(); }},
       {"Download missing info", [] { return vector<string>{boxart::status().running && boxArtRow == 0 ? boxArtProgress() : string("Press {A}")}; }, [] { return 0; },
        [](int) { if (settingsByA && !boxart::status().running) { artCache.clear(); startBoxArt(false); } }},
       {"Download all info again", [] { return vector<string>{boxart::status().running && boxArtRow == 1 ? boxArtProgress() : string("Press {A}")}; }, [] { return 0; },
@@ -2103,7 +2123,7 @@ static void drawBrowser() {
       const string& date = lastPlayedLabel(r.name);
       if (!date.empty()) textMid(date, playedC - gfx::textWidth(date, rowSmall()) / 2, ry, ROW_H, rowSmall(), col(C_DIM));
       {  // the title: a long one on the highlighted row scrolls (after 2 s) to show the rest
-        const string title = stripNes(r.name);
+        const string title = displayName(r.name);
         const float avail = favC - metadataW / 2 - rx - 28, tw = gfx::textWidth(title, rowText());
         static int marqueeRow = -1; static double marqueeSince = 0;
         if (active && top + i != marqueeRow) { marqueeRow = top + i; marqueeSince = nowMs(); }
@@ -2923,7 +2943,7 @@ int main(int argc, char** argv) {
       static bool artWasRunning = false; static int artSeen = 0;
       auto& b = boxart::status();
       if (b.running && b.found != artSeen) { artSeen = b.found; artCache.clear(); }
-      if (artWasRunning && !b.running) { artCache.clear(); artSeen = 0; showToast(b.message, 4000); }
+      if (artWasRunning && !b.running) { artCache.clear(); titleCache.clear(); orderRoms(); artSeen = 0; showToast(b.message, 4000); }
       artWasRunning = b.running;
     }
     if (toastUntil && t > toastUntil) toastUntil = 0;

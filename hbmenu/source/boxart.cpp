@@ -51,6 +51,28 @@ std::string region(const std::string& gameName) {
   return "us";
 }
 
+std::string tvSystem(const std::string& gameName) {
+  const std::string n = lower(gameName);
+  auto has = [&](const char* t) { return n.find(t) != std::string::npos; };
+  if (has("(world") || has("(w)")) return "World";
+  if (has("(japan") || has("(j)") || has("(jp)") || has("(asia") || has("(korea") || has("(taiwan") || has("(hong kong")) return "NTSC-J";
+  if (has("(usa") || has("(u)") || has("(ue)") || has("(ju)") || has("(canada") || has("(brazil")) return "NTSC";
+  if (has("(europe") || has("(e)") || has("(uk)") || has("(germany") || has("(g)") || has("(france") || has("(f)") || has("(spain") ||
+      has("(s)") || has("(italy") || has("(i)") || has("(australia") || has("(a)") || has("(sweden") || has("(netherlands") || has("(eu)") ||
+      has("(scandinavia") || has("(denmark") || has("(norway") || has("(finland") || has("(portugal") || has("(russia") || has("(poland"))
+    return "PAL";
+  return "";
+}
+std::string tvSystemOfSerial(const std::string& serial) {
+  if (serial.size() < 4) return "";
+  switch (toupper((unsigned char)serial[2])) {
+    case 'U': return "NTSC";                        // SLUS, SCUS
+    case 'E': return "PAL";                         // SLES, SCES, SCED
+    case 'P': case 'J': case 'A': case 'K': return "NTSC-J";  // SLPS, SLPM, SCPS, SCAJ (Asia), SLKA (Korea)
+  }
+  return "";
+}
+
 // ---- HTTPS ----
 static size_t toVector(char* p, size_t sz, size_t n, void* ud) { auto* v = (std::vector<uint8_t>*)ud; v->insert(v->end(), p, p + sz * n); return sz * n; }
 static long get(const std::string& url, std::vector<uint8_t>& out) {
@@ -428,8 +450,8 @@ static std::string jsonString(const std::string& s) {  // a JSON string value
   }
   return o + "\"";
 }
-static void writeInfo(const System& sys, const std::string& gameName, const std::string& title, const LbGame* g) {
-  const std::string j = "{\"title\":" + jsonString(g ? g->name : title) + ",\"developer\":" + jsonString(g ? g->developer : "") + ",\"publisher\":" + jsonString(g ? g->publisher : "") +
+static void writeInfo(const System& sys, const std::string& gameName, const std::string& title, const LbGame* g, const std::string& tv) {
+  const std::string j = "{\"title\":" + jsonString(g ? g->name : title) + ",\"region\":" + jsonString(tv) + ",\"developer\":" + jsonString(g ? g->developer : "") + ",\"publisher\":" + jsonString(g ? g->publisher : "") +
                         ",\"year\":" + jsonString(g ? g->year : "") + ",\"genre\":" + jsonString(g ? g->genres : "") + ",\"source\":" + jsonString(g ? "LaunchBox" : "") +
                         ",\"bio\":" + jsonString(g ? g->overview : "") + "}";
   std::vector<uint8_t> d(j.begin(), j.end());
@@ -465,8 +487,9 @@ static void run(System sys, std::vector<Game> games, bool again, std::function<b
     if (!wantArt && !wantInfo && !wantSnap) { st.done++; continue; }
     { std::string shown = cleanTitle(stem(g.name)); snprintf(st.current, sizeof st.current, "%s", shown.c_str()); }
     std::vector<std::string> tries;  // official names, best first
+    std::string ser;  // a disc's serial (PS2), for the region too
     if (haveDb && sys.serialOf) {  // 1. a disc's serial
-      const std::string ser = sys.serialOf(g);
+      ser = sys.serialOf(g);
       auto it = ser.empty() ? db.bySerial.end() : db.bySerial.find(ser);
       if (it != db.bySerial.end()) tries.push_back(it->second);
       logf("boxart: %s: serial %s%s", g.name.c_str(), ser.empty() ? "(none)" : ser.c_str(), it != db.bySerial.end() ? (" -> " + it->second).c_str() : "");
@@ -506,7 +529,13 @@ static void run(System sys, std::vector<Game> games, bool again, std::function<b
       if (ok) { found++; remove(missPath(sys, g.name).c_str()); }
       else { missing++; std::vector<uint8_t> none; writeFile(missPath(sys, g.name), none); }
     }
-    if (wantInfo) writeInfo(sys, g.name, cleanTitle(tries.front()), lg);
+    if (wantInfo) {
+      // the TV system: the serial's (PS2), else the official name's region, else the file name's
+      std::string tv = tvSystemOfSerial(ser);
+      if (tv.empty()) tv = tvSystem(tries.front());
+      if (tv.empty()) tv = tvSystem(g.name);
+      writeInfo(sys, g.name, cleanTitle(tries.front()), lg, tv);
+    }
     if (wantSnap) {  // a gameplay screenshot
       bool ok = false; std::vector<uint8_t> png;
       for (const std::string& n : tries) if (fetchSnap(sys, n, png)) { ok = writeFile(snapPath(sys, g.name), png); break; }
