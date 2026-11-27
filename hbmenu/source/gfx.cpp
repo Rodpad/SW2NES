@@ -486,13 +486,18 @@ void box3D(Image* front, Image* back, Image* spine, float cx, float cy, float fr
   };
   // faces: corners (counter-clockwise seen from outside), normal, textured?
   struct Face { V c[4]; V n; Image* img; float dim; bool spine; };
+  // The side image goes on the two edges along the box's length: top and bottom of a landscape box
+  // (SNES), left and right of a portrait one (NES, PS2). The other two edges are plain (`side`).
+  const bool wide = frontW > frontH;
+  Image* const lr = wide ? nullptr : spine;
+  Image* const tb = wide ? spine : nullptr;
   const Face faces[6] = {
       {{{-W, -H, D}, {W, -H, D}, {W, H, D}, {-W, H, D}}, {0, 0, 1}, front, 1.0f, false},      // front (y down)
       {{{W, -H, -D}, {-W, -H, -D}, {-W, H, -D}, {W, H, -D}}, {0, 0, -1}, back, 0.95f, false},  // back (read from behind)
-      {{{W, -H, D}, {W, -H, -D}, {W, H, -D}, {W, H, D}}, {1, 0, 0}, spine, 1.0f, true},       // right
-      {{{-W, -H, -D}, {-W, -H, D}, {-W, H, D}, {-W, H, -D}}, {-1, 0, 0}, spine, 1.0f, true},   // left (the spine)
-      {{{-W, -H, -D}, {W, -H, -D}, {W, -H, D}, {-W, -H, D}}, {0, -1, 0}, nullptr, 1.0f, false},  // top
-      {{{-W, H, D}, {W, H, D}, {W, H, -D}, {-W, H, -D}}, {0, 1, 0}, nullptr, 0.9f, false}};      // bottom
+      {{{W, -H, D}, {W, -H, -D}, {W, H, -D}, {W, H, D}}, {1, 0, 0}, lr, 1.0f, true},          // right
+      {{{-W, -H, -D}, {-W, -H, D}, {-W, H, D}, {-W, H, -D}}, {-1, 0, 0}, lr, 1.0f, true},      // left
+      {{{-W, -H, -D}, {W, -H, -D}, {W, -H, D}, {-W, -H, D}}, {0, -1, 0}, tb, 1.0f, true},      // top
+      {{{-W, H, D}, {W, H, D}, {W, H, -D}, {-W, H, -D}}, {0, 1, 0}, tb, 0.9f, true}};          // bottom
   V light{-0.45f, -0.55f, 0.70f};
   { const float l = sqrtf(light.x * light.x + light.y * light.y + light.z * light.z); light = V{light.x / l, light.y / l, light.z / l}; }
   glUseProgram(boxProg); glBindVertexArray(boxVao); glBindBuffer(GL_ARRAY_BUFFER, boxVbo);
@@ -505,9 +510,11 @@ void box3D(Image* front, Image* back, Image* spine, float cx, float cy, float fr
     const float lit = 0.5f + 0.5f * std::max(0.0f, n.x * light.x + n.y * light.y + n.z * light.z);
     float q[4][6];
     static const float UV[4][2] = {{0, 0}, {1, 0}, {1, 1}, {0, 1}};
-    // a spine image lying on its side runs up the box: turned a quarter
+    // a side image whose long edge lies across the face's: turned a quarter
     static const float UV_TURNED[4][2] = {{0, 1}, {0, 0}, {1, 0}, {1, 1}};
-    const bool turned = f.spine && f.img && f.img->w > f.img->h;
+    auto len = [](V a, V b) { return sqrtf((a.x - b.x) * (a.x - b.x) + (a.y - b.y) * (a.y - b.y) + (a.z - b.z) * (a.z - b.z)); };
+    const bool faceWide = len(f.c[0], f.c[1]) > len(f.c[0], f.c[3]);
+    const bool turned = f.spine && f.img && (f.img->w > f.img->h) != faceWide;
     for (int k = 0; k < 4; k++) { clipOf(turn(f.c[k]), q[k]); q[k][4] = turned ? UV_TURNED[k][0] : UV[k][0]; q[k][5] = turned ? UV_TURNED[k][1] : UV[k][1]; }
     const float tri[6][6] = {{q[0][0], q[0][1], q[0][2], q[0][3], q[0][4], q[0][5]}, {q[1][0], q[1][1], q[1][2], q[1][3], q[1][4], q[1][5]},
                              {q[2][0], q[2][1], q[2][2], q[2][3], q[2][4], q[2][5]}, {q[0][0], q[0][1], q[0][2], q[0][3], q[0][4], q[0][5]},

@@ -1,5 +1,5 @@
-// Box art scraper (see boxart.h). Runs on its own thread; HTTPS through libcurl (mbedTLS) with the
-// Mozilla CA bundle from romfs, so the server is verified.
+// Box art scraper (see boxart.h): ScreenScraper (screenscraper.fr). Runs on its own thread; HTTPS through
+// libcurl (mbedTLS) with the Mozilla CA bundle from romfs, so the server is verified.
 #include "boxart.h"
 
 #include <switch.h>
@@ -8,8 +8,14 @@
 #include <stdarg.h>
 #include <stdio.h>
 #include <string.h>
+#include <dirent.h>
 #include <zlib.h>
-#include <minizip/unzip.h>
+
+#include "json.h"
+#if __has_include("ss_dev.h")
+#include "ss_dev.h"  // the ScreenScraper developer account (not in the repository: see boxart.h)
+#define SW2_HAVE_SS 1
+#endif
 
 #include <algorithm>
 #include <map>
@@ -33,8 +39,6 @@ static bool exists(const std::string& p) { struct stat s; return stat(p.c_str(),
 std::string artPath(const System& sys, const std::string& gameName) { return sys.dataDir + "/art/boxart/" + stem(gameName) + ".png"; }
 std::string backPath(const System& sys, const std::string& gameName) { return sys.dataDir + "/art/boxart/" + stem(gameName) + ".back"; }
 std::string spinePath(const System& sys, const std::string& gameName) { return sys.dataDir + "/art/boxart/" + stem(gameName) + ".spine"; }
-std::string snapPath(const System& sys, const std::string& gameName) { return sys.dataDir + "/art/boxart/" + stem(gameName) + ".snap"; }
-static std::string snapMissPath(const System& sys, const std::string& gameName) { return sys.dataDir + "/art/boxart/" + stem(gameName) + ".snapnone"; }
 std::string infoPath(const System& sys, const std::string& gameName) { return sys.dataDir + "/art/info/" + stem(gameName) + ".json"; }
 static std::string missPath(const System& sys, const std::string& gameName) { return sys.dataDir + "/art/boxart/" + stem(gameName) + ".none"; }
 bool artMissing(const System& sys, const std::string& gameName) { return exists(missPath(sys, gameName)); }
@@ -75,23 +79,35 @@ std::string tvSystemOfSerial(const std::string& serial) {
 
 // ---- HTTPS ----
 static size_t toVector(char* p, size_t sz, size_t n, void* ud) { auto* v = (std::vector<uint8_t>*)ud; v->insert(v->end(), p, p + sz * n); return sz * n; }
+// One handle for a whole download (the scraper's thread only): its connections to the servers stay open and
+// are reused, so each request is not a new TCP connection, TLS handshake and CA bundle load (slow on the console:
+// about 7 s a game with a fresh handle per request, against about 2 s of transfer).
+static std::atomic<bool> s_cancel{false};  // stop(): the app is exiting
+static int abortIfCancelled(void*, curl_off_t, curl_off_t, curl_off_t, curl_off_t) { return s_cancel ? 1 : 0; }  // (non-zero ends the transfer)
+static CURL* s_curl = nullptr;
+static void closeConnections() { if (s_curl) { curl_easy_cleanup(s_curl); s_curl = nullptr; } }
 static long get(const std::string& url, std::vector<uint8_t>& out) {
   out.clear();
-  CURL* c = curl_easy_init();
-  if (!c) return -1;
-  curl_easy_setopt(c, CURLOPT_URL, url.c_str());
-  curl_easy_setopt(c, CURLOPT_CAINFO, "romfs:/net/cacert.pem");
-  curl_easy_setopt(c, CURLOPT_FOLLOWLOCATION, 1L);
-  curl_easy_setopt(c, CURLOPT_WRITEFUNCTION, toVector);
-  curl_easy_setopt(c, CURLOPT_WRITEDATA, &out);
-  curl_easy_setopt(c, CURLOPT_USERAGENT, "SW2-emulator-boxart/1.0");
-  curl_easy_setopt(c, CURLOPT_CONNECTTIMEOUT, 15L);
-  curl_easy_setopt(c, CURLOPT_TIMEOUT, 60L);
+  if (!s_curl) {
+    s_curl = curl_easy_init();
+    if (!s_curl) return -1;
+    curl_easy_setopt(s_curl, CURLOPT_CAINFO, "romfs:/net/cacert.pem");
+    curl_easy_setopt(s_curl, CURLOPT_FOLLOWLOCATION, 1L);
+    curl_easy_setopt(s_curl, CURLOPT_WRITEFUNCTION, toVector);
+    curl_easy_setopt(s_curl, CURLOPT_USERAGENT, "SW2-emulator-boxart/1.0");
+    curl_easy_setopt(s_curl, CURLOPT_ACCEPT_ENCODING, "");  // compressed when the server can (ScreenScraper's game details: 843 KB -> 176 KB with gzip)
+    curl_easy_setopt(s_curl, CURLOPT_CONNECTTIMEOUT, 15L);
+    curl_easy_setopt(s_curl, CURLOPT_TIMEOUT, 180L);  // (a game's details are ~1 MB, and anonymous users get 128 KB/s)
+    curl_easy_setopt(s_curl, CURLOPT_TCP_KEEPALIVE, 1L);
+    curl_easy_setopt(s_curl, CURLOPT_XFERINFOFUNCTION, abortIfCancelled);
+    curl_easy_setopt(s_curl, CURLOPT_NOPROGRESS, 0L);
+  }
+  curl_easy_setopt(s_curl, CURLOPT_URL, url.c_str());
+  curl_easy_setopt(s_curl, CURLOPT_WRITEDATA, &out);
   long code = -1;
-  const CURLcode r = curl_easy_perform(c);
-  if (r == CURLE_OK) curl_easy_getinfo(c, CURLINFO_RESPONSE_CODE, &code);
-  else logf("boxart: %s: %s", url.c_str(), curl_easy_strerror(r));
-  curl_easy_cleanup(c);
+  const CURLcode r = curl_easy_perform(s_curl);
+  if (r == CURLE_OK) curl_easy_getinfo(s_curl, CURLINFO_RESPONSE_CODE, &code);
+  else { logf("boxart: %s: %s", url.substr(0, url.find('?')).c_str(), curl_easy_strerror(r)); closeConnections(); }  // (never the query: it holds the developer account)
   return code;
 }
 static std::string encode(const std::string& s) {  // a URL path segment
@@ -180,265 +196,46 @@ std::string discSerial(const std::string& path0) {
   return serial;
 }
 
-// ---- the No-Intro database: CRC32 -> name, and titles ----
-struct Db {
-  std::map<uint32_t, std::string> byCrc;
-  std::map<std::string, std::string> bySerial;  // disc serial ("SLUS-21008") -> name
-  std::map<std::string, uint32_t> crcOf;  // official name -> CRC32 (for the metadata)
-  std::vector<std::string> names;
-};
-static std::string titleKey(const std::string& name) {  // "Tick, The (USA) [!]" -> "tick the"
-  std::string t = name.substr(0, std::min(name.find(" ("), name.find(" [")));
-  std::string o;
-  for (char ch : lower(t)) { if (isalnum((unsigned char)ch)) o += ch; else if (!o.empty() && o.back() != ' ') o += ' '; }
-  while (!o.empty() && o.back() == ' ') o.pop_back();
-  return o;
+// ---- ScreenScraper ----
+// The developer account, kept out of the repository (ss_dev.h, made by tools/make_ss_dev.sh) and lightly
+// obscured in the binary. Players need no account: requests go as the anonymous user.
+static std::string ssDev(const unsigned char* d, size_t n) {
+  std::string s;
+#ifdef SW2_HAVE_SS
+  for (size_t i = 0; i < n; i++) s += (char)(d[i] ^ (unsigned char)(0x5A + i * 7));
+#else
+  (void)d; (void)n;
+#endif
+  return s;
 }
-static bool loadDb(const System& sys, Db& db) {
-  const std::string path = sys.dataDir + "/art/" + sys.dbName + ".dat";
-  std::string text;
-  if (!readAll(path, text) || text.size() < 1000) {
-    std::vector<uint8_t> d;
-    const std::string url = std::string("https://raw.githubusercontent.com/libretro/libretro-database/master/metadat/") + sys.dbFolder + "/" + encode(sys.dbName) + ".dat";
-    if (get(url, d) != 200 || d.size() < 1000 || !writeFile(path, d)) return false;
-    text.assign(d.begin(), d.end());
-  }
-  // game ( name "X" ... rom ( name "X.ext" size N crc HHHHHHHH ... ) )
-  size_t pos = 0;
-  std::string game;
-  while ((pos = text.find('\n', pos)) != std::string::npos) {
-    ++pos;
-    size_t e = text.find('\n', pos); if (e == std::string::npos) e = text.size();
-    const std::string line = text.substr(pos, e - pos);
-    size_t q;
-    if (line.compare(0, 7, "\tname \"") == 0 && (q = line.rfind('"')) > 7) { game = line.substr(7, q - 7); db.names.push_back(game); }
-    else if (line.compare(0, 9, "\tserial \"") == 0 && (q = line.rfind('"')) > 9 && !game.empty()) {
-      std::string v = line.substr(9, q - 9);  // may list several: "SLUS-20312, SLUS-20312GH"
-      size_t a = 0;
-      while (a < v.size()) { size_t c = v.find(',', a); if (c == std::string::npos) c = v.size(); std::string one = v.substr(a, c - a); while (!one.empty() && one[0] == ' ') one.erase(0, 1); if (!one.empty()) db.bySerial.emplace(one, game); a = c + 1; }
-    }
-    else if ((q = line.find(" crc ")) != std::string::npos && !game.empty()) { const uint32_t crc = (uint32_t)strtoul(line.c_str() + q + 5, nullptr, 16); db.byCrc[crc] = game; db.crcOf.emplace(game, crc); }
-  }
-  return !db.byCrc.empty() || !db.bySerial.empty();
+static std::string ssAuth(const System& sys) {
+#ifdef SW2_HAVE_SS
+  return "devid=" + encode(ssDev(SS_DEVID, sizeof SS_DEVID)) + "&devpassword=" + encode(ssDev(SS_DEVPASSWORD, sizeof SS_DEVPASSWORD)) +
+         "&softname=" + encode(sys.softname) + "&ssid=&sspassword=&output=json";
+#else
+  (void)sys;
+  return "";
+#endif
 }
-
-// The thumbnail file name for a game name: libretro replaces &*/:`<>?\|" with _.
-static std::string thumbName(const std::string& name) {
-  std::string o = name;
-  for (auto& ch : o) if (strchr("&*/:`<>?\\|\"", ch)) ch = '_';
-  return o;
+static std::string str(const Json* j, const char* k) { const Json* v = j ? j->get(k) : nullptr; return v && v->isStr() ? v->s : std::string(); }
+// ScreenScraper's region codes in the order to prefer for a game of region `reg` (us / eu / jp).
+static std::vector<std::string> regionOrder(const std::string& reg) {
+  if (reg == "jp") return {"jp", "wor", "ss", "us", "eu", "asi", "kr", "uk"};
+  if (reg == "eu") return {"eu", "uk", "wor", "ss", "fr", "de", "sp", "it", "nl", "au", "us", "jp"};
+  return {"us", "wor", "ss", "cus", "eu", "uk", "au", "jp"};
 }
-static bool fetchSnap(const System& sys, const std::string& name, std::vector<uint8_t>& png) {
-  const std::string url = std::string("https://raw.githubusercontent.com/libretro-thumbnails/") + sys.repo + "/master/Named_Snaps/" + encode(thumbName(name)) + ".png";
-  return get(url, png) == 200 && png.size() > 8 && png[1] == 'P' && png[2] == 'N' && png[3] == 'G';
+// The text in a list of {region|langue, text} entries, by preference; else the first.
+static std::string pickText(const Json* arr, const char* key, const std::vector<std::string>& order) {
+  if (!arr || !arr->isArr() || arr->a.empty()) return "";
+  for (const std::string& r : order) for (const Json& e : arr->a) if (str(&e, key) == r) return str(&e, "text");
+  return str(&arr->a[0], "text");
 }
-static bool fetchArt(const System& sys, const std::string& name, std::vector<uint8_t>& png) {
-  const std::string url = std::string("https://raw.githubusercontent.com/libretro-thumbnails/") + sys.repo + "/master/Named_Boxarts/" + encode(thumbName(name)) + ".png";
-  return get(url, png) == 200 && png.size() > 8 && png[1] == 'P' && png[2] == 'N' && png[3] == 'G';
-}
-
-// ---- LaunchBox Games Database: details and box images (front, back, spine) ----
-// Its public Metadata.zip (one large XML) is downloaded once and read through without unpacking it to
-// the card; only this system's games are kept, in a small index (<data>/art/launchbox.tsv), and the
-// zip is deleted. Images: https://images.launchbox-app.com/<FileName>.
-struct LbGame { std::string name, developer, publisher, year, genres, overview; };
-struct LbImage { std::string type, region, file; };  // type: F front, B back, S spine
-struct Lb {
-  std::map<std::string, LbGame> games;                 // by DatabaseID
-  std::map<std::string, std::vector<LbImage>> images;  // by DatabaseID
-  std::map<std::string, std::string> byKey;            // title key (names and alternate names) -> DatabaseID
-};
-// "Tick, The (USA) [!]" -> "The Tick"
-static std::string cleanTitle(const std::string& name) {
-  std::string t = name.substr(0, std::min(name.find(" ("), name.find(" [")));
-  const size_t c = t.rfind(", ");
-  if (c != std::string::npos) { const std::string art = t.substr(c + 2); if (art == "The" || art == "A" || art == "An") t = art + " " + t.substr(0, c); }
-  return t;
-}
-static std::string words(const std::string& s) {  // lower-case letters and digits, single spaces
-  std::string o;
-  for (char ch : lower(s)) { if (isalnum((unsigned char)ch)) o += ch; else if (ch == '\'') continue; else if (!o.empty() && o.back() != ' ') o += ' '; }
-  while (!o.empty() && o.back() == ' ') o.pop_back();
-  return o;
-}
-static std::string lbKey(const std::string& title) {  // "The Legend of Zelda: A Link to the Past" -> "legend of zelda a link to the past"
-  std::string w = words(title);
-  if (w.compare(0, 4, "the ") == 0) w = w.substr(4);
-  return w;
-}
-static std::string xmlText(const std::string& s) {  // XML entities -> text
-  std::string o;
-  for (size_t i = 0; i < s.size(); i++) {
-    if (s[i] != '&') { o += s[i]; continue; }
-    const size_t e = s.find(';', i);
-    if (e == std::string::npos || e - i > 10) { o += s[i]; continue; }
-    const std::string ent = s.substr(i + 1, e - i - 1);
-    if (ent == "amp") o += '&'; else if (ent == "lt") o += '<'; else if (ent == "gt") o += '>'; else if (ent == "quot") o += '"'; else if (ent == "apos") o += '\'';
-    else if (!ent.empty() && ent[0] == '#') {
-      unsigned cp = ent.size() > 1 && (ent[1] == 'x' || ent[1] == 'X') ? (unsigned)strtoul(ent.c_str() + 2, nullptr, 16) : (unsigned)strtoul(ent.c_str() + 1, nullptr, 10);
-      if (cp < 0x80) o += (char)cp;
-      else if (cp < 0x800) { o += (char)(0xC0 | (cp >> 6)); o += (char)(0x80 | (cp & 63)); }
-      else { o += (char)(0xE0 | ((cp >> 12) & 15)); o += (char)(0x80 | ((cp >> 6) & 63)); o += (char)(0x80 | (cp & 63)); }
-    } else { o += s.substr(i, e - i + 1); }
-    i = e;
-  }
-  return o;
-}
-static std::string tsvField(const std::string& s) { std::string o; for (char ch : s) o += ch == '\t' ? ' ' : ch == '\n' ? '\x01' : ch == '\r' ? ' ' : ch; return o; }
-static std::string tsvText(const std::string& s) { std::string o = s; for (auto& ch : o) if (ch == '\x01') ch = '\n'; return o; }
-static std::vector<std::string> splitTab(const std::string& l) { std::vector<std::string> v; size_t p = 0; for (;;) { const size_t e = l.find('\t', p); v.push_back(l.substr(p, e == std::string::npos ? std::string::npos : e - p)); if (e == std::string::npos) break; p = e + 1; } return v; }
-
-static size_t toFile(char* p, size_t sz, size_t n, void* ud) { return fwrite(p, sz, n, (FILE*)ud) * sz; }
-static int progress(void*, curl_off_t total, curl_off_t now, curl_off_t, curl_off_t) {
-  st.gotMB = (int)(now >> 20); st.sizeMB = (int)(total >> 20);
-  return 0;
-}
-// A large download to a file; an interrupted one (path.part left behind) carries on where it stopped.
-static bool downloadTo(const std::string& url, const std::string& path) {
-  struct stat ps; const curl_off_t have = stat((path + ".part").c_str(), &ps) == 0 ? (curl_off_t)ps.st_size : 0;
-  FILE* f = fopen((path + ".part").c_str(), have ? "ab" : "wb");
-  if (!f) return false;
-  if (have) logf("boxart: resuming at %lld bytes", (long long)have);
-  CURL* c = curl_easy_init();
-  if (have) curl_easy_setopt(c, CURLOPT_RESUME_FROM_LARGE, have);
-  curl_easy_setopt(c, CURLOPT_NOPROGRESS, 0L);
-  curl_easy_setopt(c, CURLOPT_XFERINFOFUNCTION, progress);
-  curl_easy_setopt(c, CURLOPT_URL, url.c_str());
-  curl_easy_setopt(c, CURLOPT_CAINFO, "romfs:/net/cacert.pem");
-  curl_easy_setopt(c, CURLOPT_FOLLOWLOCATION, 1L);
-  curl_easy_setopt(c, CURLOPT_WRITEFUNCTION, toFile);
-  curl_easy_setopt(c, CURLOPT_WRITEDATA, f);
-  curl_easy_setopt(c, CURLOPT_USERAGENT, "SW2-emulator-boxart/1.0");
-  curl_easy_setopt(c, CURLOPT_CONNECTTIMEOUT, 20L);
-  long code = -1;
-  const CURLcode r = curl_easy_perform(c);
-  if (r == CURLE_OK) curl_easy_getinfo(c, CURLINFO_RESPONSE_CODE, &code);
-  else logf("boxart: %s: %s", url.c_str(), curl_easy_strerror(r));
-  curl_easy_cleanup(c);
-  fclose(f);
-  if (code != 200 && code != 206) { if (code != -1) remove((path + ".part").c_str()); return false; }  // (a broken connection keeps the part)
-  remove(path.c_str());
-  return rename((path + ".part").c_str(), path.c_str()) == 0;
-}
-
-// Reads Metadata.xml from the zip line by line, keeping this system's games, their alternate names
-// and box images; writes the index.
-static bool buildLbIndex(const System& sys, const std::string& zipPath, const std::string& indexPath) {
-  unzFile z = unzOpen(zipPath.c_str());
-  if (!z) return false;
-  bool ok = unzLocateFile(z, "Metadata.xml", 0) == UNZ_OK && unzOpenCurrentFile(z) == UNZ_OK;
-  if (!ok) { unzClose(z); return false; }
-  std::map<std::string, LbGame> games;
-  std::vector<std::pair<std::string, std::string>> alts;     // id, name
-  std::vector<std::pair<std::string, LbImage>> imgs;        // id, image
-  enum { NONE, GAME, ALT, IMAGE } in = NONE;
-  std::map<std::string, std::string> f;  // the current element's fields
-  std::string field, value; bool multi = false;
-  auto tag = [](const std::string& l, std::string& name, std::string& val, bool& open) {  // "<Name>val</Name>" or "<Overview>start..."
-    const size_t a = l.find('<'); if (a == std::string::npos || l.size() < a + 2 || l[a + 1] == '/') return false;
-    const size_t b = l.find('>', a); if (b == std::string::npos || l[b - 1] == '/') return false;
-    name = l.substr(a + 1, b - a - 1);
-    const size_t e = l.find("</" + name + ">", b);
-    open = e == std::string::npos;
-    val = l.substr(b + 1, open ? std::string::npos : e - b - 1);
-    return true;
-  };
-  std::string buf, line; std::vector<char> chunk(1 << 16);
-  long lines = 0;
-  for (;;) {
-    const int n = unzReadCurrentFile(z, chunk.data(), (unsigned)chunk.size());
-    if (n <= 0) break;
-    buf.append(chunk.data(), n);
-    size_t p = 0, e;
-    while ((e = buf.find('\n', p)) != std::string::npos) {
-      line.assign(buf, p, e - p); p = e + 1; lines++;
-      if (multi) {  // inside a field that spans lines (Overview)
-        const size_t end = line.find("</" + field + ">");
-        if (end == std::string::npos) { value += "\n" + line; continue; }
-        value += "\n" + line.substr(0, end); f[field] = xmlText(value); multi = false; continue;
-      }
-      const size_t s0 = line.find_first_not_of(' ');
-      if (s0 == std::string::npos) continue;
-      if (line.compare(s0, 6, "<Game>") == 0) { in = GAME; f.clear(); continue; }
-      if (line.compare(s0, 19, "<GameAlternateName>") == 0) { in = ALT; f.clear(); continue; }
-      if (line.compare(s0, 11, "<GameImage>") == 0) { in = IMAGE; f.clear(); continue; }
-      if (line.compare(s0, 7, "</Game>") == 0) {
-        if (f["Platform"] == sys.lbPlatform) {
-          LbGame g; g.name = f["Name"]; g.developer = f["Developer"]; g.publisher = f["Publisher"]; g.genres = f["Genres"]; g.overview = f["Overview"];
-          g.year = !f["ReleaseYear"].empty() ? f["ReleaseYear"] : f["ReleaseDate"].substr(0, 4);
-          games[f["DatabaseID"]] = g;
-        }
-        in = NONE; continue;
-      }
-      if (line.compare(s0, 20, "</GameAlternateName>") == 0) { if (games.count(f["DatabaseID"])) alts.push_back({f["DatabaseID"], f["AlternateName"]}); in = NONE; continue; }
-      if (line.compare(s0, 12, "</GameImage>") == 0) {
-        const std::string& t = f["Type"];
-        const std::string ty = t == "Box - Front" ? "F" : t == "Box - Back" ? "B" : t == "Box - Spine" ? "S" : "";
-        if (!ty.empty() && games.count(f["DatabaseID"])) imgs.push_back({f["DatabaseID"], LbImage{ty, f["Region"], f["FileName"]}});
-        in = NONE; continue;
-      }
-      if (in == NONE) continue;
-      std::string name, val; bool open;
-      if (!tag(line.substr(s0), name, val, open)) continue;
-      if (open) { field = name; value = val; multi = true; } else f[name] = xmlText(val);
-    }
-    buf.erase(0, p);
-  }
-  unzCloseCurrentFile(z); unzClose(z);
-  logf("boxart: LaunchBox: %ld lines read, %d %s games, %d alternate names, %d box images", lines, (int)games.size(), sys.lbPlatform, (int)alts.size(), (int)imgs.size());
-  if (games.empty()) return false;
-  std::string out;
-  for (auto& kv : games) { const LbGame& g = kv.second; out += "G\t" + kv.first + "\t" + tsvField(g.name) + "\t" + tsvField(g.developer) + "\t" + tsvField(g.publisher) + "\t" + tsvField(g.year) + "\t" + tsvField(g.genres) + "\t" + tsvField(g.overview) + "\n"; }
-  for (auto& a : alts) out += "A\t" + a.first + "\t" + tsvField(a.second) + "\n";
-  for (auto& i : imgs) out += "I\t" + i.first + "\t" + i.second.type + "\t" + tsvField(i.second.region) + "\t" + tsvField(i.second.file) + "\n";
-  std::vector<uint8_t> d(out.begin(), out.end());
-  return writeFile(indexPath, d);
-}
-static bool loadLb(const System& sys, Lb& lb, bool rebuild) {
-  const std::string index = sys.dataDir + "/art/launchbox.tsv", zip = sys.dataDir + "/art/launchbox-metadata.zip";
-  std::string text;
-  if (rebuild || !readAll(index, text) || text.size() < 100) {
-    st.phase = 1;
-    logf("boxart: downloading the LaunchBox database");
-    if (!downloadTo("https://gamesdb.launchbox-app.com/Metadata.zip", zip)) { st.phase = 0; return false; }
-    st.phase = 2;
-    const bool built = buildLbIndex(sys, zip, index);
-    remove(zip.c_str());
-    st.phase = 0;
-    if (!built || !readAll(index, text)) return false;
-  }
-  size_t p = 0;
-  while (p < text.size()) {
-    size_t e = text.find('\n', p); if (e == std::string::npos) e = text.size();
-    const std::vector<std::string> v = splitTab(text.substr(p, e - p)); p = e + 1;
-    if (v[0] == "G" && v.size() >= 8) { lb.games[v[1]] = LbGame{v[2], v[3], v[4], v[5], v[6], tsvText(v[7])}; lb.byKey.emplace(lbKey(v[2]), v[1]); }
-    else if (v[0] == "A" && v.size() >= 3) lb.byKey.emplace(lbKey(v[2]), v[1]);
-    else if (v[0] == "I" && v.size() >= 5) lb.images[v[1]].push_back(LbImage{v[2], v[3], v[4]});
-  }
-  return !lb.games.empty();
-}
-// The best image of a type for a region (the game's region, then worldwide / unmarked, then any).
-static const LbImage* lbPick(const Lb& lb, const std::string& id, const char* type, const std::string& reg) {
-  auto it = lb.images.find(id);
-  if (it == lb.images.end()) return nullptr;
-  auto score = [&](const std::string& r) {
-    const std::string l = lower(r);
-    const bool us = l.find("north america") != std::string::npos || l.find("united states") != std::string::npos || l == "canada";
-    const bool jp = l.find("japan") != std::string::npos;
-    const bool world = l.empty() || l == "world";
-    const bool eu = !us && !jp && !world;
-    if ((reg == "us" && us) || (reg == "jp" && jp) || (reg == "eu" && eu)) return 0;
-    return world ? 1 : 2;
-  };
-  const LbImage* best = nullptr; int bestScore = 9;
-  for (const LbImage& im : it->second) if (im.type == type) { const int s = score(im.region); if (s < bestScore) { best = &im; bestScore = s; } }
-  return best;
-}
-static bool fetchLbImage(const LbImage* im, const std::string& path) {
-  if (!im) return false;
-  std::vector<uint8_t> d;
-  if (get("https://images.launchbox-app.com/" + encode(im->file), d) != 200 || d.size() < 100) return false;
-  return writeFile(path, d);
+static std::string tvOfRegion(const std::string& r) {
+  if (r == "jp" || r == "asi" || r == "kr" || r == "tw") return "NTSC-J";
+  if (r == "us" || r == "cus" || r == "br") return "NTSC";
+  if (r == "wor") return "World";
+  if (r.empty() || r == "ss") return "";
+  return "PAL";
 }
 static std::string jsonString(const std::string& s) {  // a JSON string value
   std::string o = "\"";
@@ -450,102 +247,189 @@ static std::string jsonString(const std::string& s) {  // a JSON string value
   }
   return o + "\"";
 }
-static void writeInfo(const System& sys, const std::string& gameName, const std::string& title, const LbGame* g, const std::string& tv) {
-  const std::string j = "{\"title\":" + jsonString(g ? g->name : title) + ",\"region\":" + jsonString(tv) + ",\"developer\":" + jsonString(g ? g->developer : "") + ",\"publisher\":" + jsonString(g ? g->publisher : "") +
-                        ",\"year\":" + jsonString(g ? g->year : "") + ",\"genre\":" + jsonString(g ? g->genres : "") + ",\"source\":" + jsonString(g ? "LaunchBox" : "") +
-                        ",\"bio\":" + jsonString(g ? g->overview : "") + "}";
+// One media of a type, by region preference (the game's own region first); "" when none.
+static const Json* pickMedia(const Json* medias, const char* type, const std::vector<std::string>& order, const std::string& want = "") {
+  if (!medias || !medias->isArr()) return nullptr;
+  const Json* any = nullptr;
+  if (!want.empty()) for (const Json& m : medias->a) if (str(&m, "type") == type && str(&m, "region") == want) return &m;
+  for (const std::string& r : order) for (const Json& m : medias->a) if (str(&m, "type") == type && str(&m, "region") == r) return &m;
+  for (const Json& m : medias->a) if (str(&m, "type") == type) { any = &m; break; }
+  return any;
+}
+static bool fetchMedia(const Json* m, const std::string& path) {
+  if (!m) return false;
+  std::string url = str(m, "url");
+  if (url.empty()) return false;
+  url += "&maxwidth=640&maxheight=640&outputformat=jpg";  // smaller to fetch (anonymous users get 128 KB/s); still sharper than the box is drawn
+  std::vector<uint8_t> d;
+  const long code = get(url, d);
+  const bool image = d.size() > 3 && ((d[0] == 0xFF && d[1] == 0xD8) || (d[1] == 'P' && d[2] == 'N' && d[3] == 'G'));
+  return code == 200 && image && writeFile(path, d);
+}
+
+// Deletes the art folder of earlier builds (LaunchBox / libretro images and details, their databases)
+// once, so only ScreenScraper's remains; marked by art/.screenscraper.
+static void removeTree(const std::string& dir) {
+  DIR* d = opendir(dir.c_str());
+  if (!d) { remove(dir.c_str()); return; }
+  std::vector<std::string> names;
+  while (dirent* e = readdir(d)) if (strcmp(e->d_name, ".") && strcmp(e->d_name, "..")) names.push_back(e->d_name);
+  closedir(d);
+  for (const std::string& n : names) {
+    const std::string p = dir + "/" + n;
+    struct stat s;
+    if (stat(p.c_str(), &s) == 0 && S_ISDIR(s.st_mode)) removeTree(p); else remove(p.c_str());
+  }
+  rmdir(dir.c_str());
+}
+void cleanOldArt(const System& sys) {
+  const std::string art = sys.dataDir + "/art", marker = art + "/.screenscraper";
+  if (exists(marker)) return;
+  if (exists(art)) { logf("boxart: removing the art of earlier builds (other sources)"); removeTree(art); }
+  mkdir(art.c_str(), 0777);
+  FILE* f = fopen(marker.c_str(), "wb");
+  if (f) { fputs("ScreenScraper\n", f); fclose(f); }
+}
+
+static void writeInfo(const System& sys, const std::string& gameName, const std::string& title, const std::string& developer, const std::string& publisher,
+                      const std::string& year, const std::string& genre, const std::string& bio, const std::string& tv) {
+  const std::string j = "{\"title\":" + jsonString(title) + ",\"region\":" + jsonString(tv) + ",\"developer\":" + jsonString(developer) +
+                        ",\"publisher\":" + jsonString(publisher) + ",\"year\":" + jsonString(year) + ",\"genre\":" + jsonString(genre) +
+                        ",\"source\":\"ScreenScraper\",\"bio\":" + jsonString(bio) + "}";
   std::vector<uint8_t> d(j.begin(), j.end());
   writeFile(infoPath(sys, gameName), d);
 }
 
+// What a lookup came to: found, not in ScreenScraper, or stop (quota, closed API, no access).
+enum class Look { Found, NotFound, Stop };
+static Look lookUp(const System& sys, const Game& g, const std::string& query, Json& out, std::string& why) {
+  std::vector<uint8_t> d;
+  const long code = get("https://api.screenscraper.fr/api2/jeuInfos.php?" + ssAuth(sys) + "&systemeid=" + std::to_string(sys.ssSystemId) + query, d);
+  const std::string text(d.begin(), d.end());
+  if (code == 200 && Json::parse(text, out) && out.get("response")) return Look::Found;
+  // ScreenScraper answers errors in plain text (French), with these codes:
+  if (code == 404) return Look::NotFound;  // "Erreur : Rom/Iso/Dossier non trouvée !"
+  why = code == 401 || code == 403 ? "ScreenScraper refused this app (developer access)" :
+        code == 423 ? "ScreenScraper's API is closed for now" :
+        code == 426 ? "ScreenScraper no longer accepts this app version" :
+        code == 429 || code == 430 || code == 431 ? "ScreenScraper's daily limit for anonymous users is reached; try again tomorrow" :
+        code < 0 ? "no connection to ScreenScraper" : "ScreenScraper error " + std::to_string(code);
+  logf("boxart: %s: HTTP %ld: %s", g.name.c_str(), code, text.substr(0, 120).c_str());
+  return code >= 500 && code < 600 ? Look::NotFound : Look::Stop;  // (a server error: skip this game)
+}
+
 static void run(System sys, std::vector<Game> games, bool again, std::function<bool(const Game&, std::vector<uint8_t>&)> readFile, int limit) {
-  logf("boxart: %d games%s%s", (int)games.size(), again ? ", all again" : "", limit ? (", first " + std::to_string(limit)).c_str() : "");
-  mkdir((sys.dataDir + "/art").c_str(), 0777);
+  logf("boxart: %d games%s%s (ScreenScraper)", (int)games.size(), again ? ", all again" : "", limit ? (", first " + std::to_string(limit)).c_str() : "");
+  cleanOldArt(sys);
   mkdir((sys.dataDir + "/art/boxart").c_str(), 0777);
   mkdir((sys.dataDir + "/art/info").c_str(), 0777);
-  for (const char* old : {"developer", "publisher", "releaseyear", "genre"}) remove((sys.dataDir + "/art/" + old + ".dat").c_str());  // (earlier test builds')
-  auto needArt = [&](const Game& g) { return again || (!exists(artPath(sys, g.name)) && !exists(missPath(sys, g.name))); };
+  for (const char* sub : {"/art/boxart", "/art/info"}) {  // files a crash or an exit left half written (never read)
+    const std::string dir = sys.dataDir + sub;
+    if (DIR* d = opendir(dir.c_str())) {
+      std::vector<std::string> parts;
+      while (dirent* e = readdir(d)) { const size_t n = strlen(e->d_name); if (n > 5 && !strcmp(e->d_name + n - 5, ".part")) parts.push_back(dir + "/" + e->d_name); }
+      closedir(d);
+      for (const std::string& f : parts) remove(f.c_str());
+    }
+  }
+  if (ssAuth(sys).empty()) {
+    st.current[0] = 0; st.message = "Box art: this build has no ScreenScraper access"; st.running = false;
+    logf("boxart: built without ss_dev.h: no ScreenScraper access");
+    return;
+  }
+  // A game is complete when its details file exists: it is written last, so a game interrupted part way (an exit or a
+  // crash after its front image) is looked up again in full, back and side included.
+  auto needArt = [&](const Game& g) { return again || !exists(infoPath(sys, g.name)) || (!exists(artPath(sys, g.name)) && !exists(missPath(sys, g.name))); };
   auto needInfo = [&](const Game& g) { return again || !exists(infoPath(sys, g.name)); };
-  auto needSnap = [&](const Game&) { return false; };  // screenshots: not downloaded for now (fetchSnap kept for later)
   if (limit) {  // only the first `limit` games that need looking up
     std::vector<Game> want;
-    for (const Game& g : games) if (needArt(g) || needInfo(g) || needSnap(g)) { want.push_back(g); if ((int)want.size() >= limit) break; }
+    for (const Game& g : games) if (needArt(g) || needInfo(g)) { want.push_back(g); if ((int)want.size() >= limit) break; }
     games = want;
   }
   st.total = (int)games.size();
-  Db db;
-  const bool haveDb = loadDb(sys, db);
-  logf("boxart: No-Intro database %s (%d entries)", haveDb ? "ready" : "NOT available", (int)db.byCrc.size());
-  std::map<std::string, std::vector<std::string>> byTitle;  // title key -> official names
-  for (auto& n : db.names) byTitle[titleKey(n)].push_back(n);
-  Lb lb;
-  const bool haveLb = loadLb(sys, lb, false);
-  logf("boxart: LaunchBox %s (%d games)", haveLb ? "ready" : "NOT available", (int)lb.games.size());
   int found = 0, missing = 0;
+  std::string stopWhy;
   for (const Game& g : games) {
-    const bool wantArt = needArt(g), wantInfo = needInfo(g), wantSnap = needSnap(g);
-    if (!wantArt && !wantInfo && !wantSnap) { st.done++; continue; }
-    { std::string shown = cleanTitle(stem(g.name)); snprintf(st.current, sizeof st.current, "%s", shown.c_str()); }
-    std::vector<std::string> tries;  // official names, best first
-    std::string ser;  // a disc's serial (PS2), for the region too
-    if (haveDb && sys.serialOf) {  // 1. a disc's serial
+    if (s_cancel) break;
+    const bool wantArt = needArt(g), wantInfo = needInfo(g);
+    if (!wantArt && !wantInfo) { st.done++; continue; }
+    snprintf(st.current, sizeof st.current, "%s", stem(g.name).c_str());
+    const u64 t0 = armGetSystemTick();
+    // The query: a disc's serial (PS2), or the contents' CRC32; with the file's name and size either way.
+    std::string query, ser;
+    struct stat fs;
+    const long long size = stat(g.path.c_str(), &fs) == 0 ? (long long)fs.st_size : 0;
+    if (sys.serialOf) {
       ser = sys.serialOf(g);
-      auto it = ser.empty() ? db.bySerial.end() : db.bySerial.find(ser);
-      if (it != db.bySerial.end()) tries.push_back(it->second);
-      logf("boxart: %s: serial %s%s", g.name.c_str(), ser.empty() ? "(none)" : ser.c_str(), it != db.bySerial.end() ? (" -> " + it->second).c_str() : "");
-    }
-    if (haveDb) {  // 1. the contents' CRC32
+      query = "&romtype=iso" + (ser.empty() ? std::string() : "&serialnum=" + encode(ser));
+    } else {
+      query = "&romtype=rom";
       std::vector<uint8_t> file;
-      if (!sys.serialOf && readFile && readFile(g, file) && !file.empty()) {
+      if (readFile && readFile(g, file) && !file.empty()) {
         size_t off = 0, len = file.size();
         if (sys.crcRange) sys.crcRange(file, off, len);
         if (off + len <= file.size()) {
-          const uint32_t crc = (uint32_t)crc32(0L, file.data() + off, (uInt)len);
-          auto it = db.byCrc.find(crc);
-          if (it != db.byCrc.end()) tries.push_back(it->second);
+          char crc[16]; snprintf(crc, sizeof crc, "%08X", (unsigned)crc32(0L, file.data() + off, (uInt)len));
+          query += std::string("&crc=") + crc;
         }
       }
-      // 2. the same title, the game's region first
-      auto t = byTitle.find(titleKey(stem(g.name)));
-      if (t != byTitle.end()) {
-        const std::string r = region(g.name);
-        std::vector<std::string> v = t->second;
-        std::stable_sort(v.begin(), v.end(), [&](const std::string& a, const std::string& b) { return (region(a) == r) > (region(b) == r); });
-        for (auto& n : v) if (tries.size() < 6 && std::find(tries.begin(), tries.end(), n) == tries.end()) tries.push_back(n);
-      }
     }
-    tries.push_back(stem(g.name));  // 3. the file name as it is
-    // The LaunchBox game: by the best names' titles
-    std::string lbId;
-    for (const std::string& n : tries) { auto k = lb.byKey.find(lbKey(cleanTitle(n))); if (k != lb.byKey.end()) { lbId = k->second; break; } }
-    const LbGame* lg = lbId.empty() ? nullptr : &lb.games[lbId];
-    const std::string reg = region(tries.front());
+    query += "&romnom=" + encode(g.name) + "&romtaille=" + std::to_string(size);
+    Json resp; std::string why;
+    const Look look = lookUp(sys, g, query, resp, why);
+    if (look == Look::Stop) { stopWhy = why; break; }
+    const Json* jeu = look == Look::Found ? resp.get("response")->get("jeu") : nullptr;
+    // the game's region: its serial (PS2), the ROM ScreenScraper matched, or the file name
+    std::string tv = tvSystemOfSerial(ser);
+    std::string reg = tv == "NTSC" ? "us" : tv == "PAL" ? "eu" : tv == "NTSC-J" ? "jp" : "";
+    if (jeu && reg.empty()) {
+      const Json* regs = jeu->get("rom") ? jeu->get("rom")->get("romregions") : nullptr;
+      std::string r = regs && regs->isStr() ? regs->s : "";
+      if (r.find(',') != std::string::npos) r = r.substr(0, r.find(','));
+      if (tv.empty()) tv = tvOfRegion(r);
+      reg = r == "jp" || r == "asi" || r == "kr" ? "jp" : r == "us" || r == "cus" || r == "wor" || r == "ss" || r.empty() ? "" : "eu";
+    }
+    if (tv.empty()) tv = tvSystem(g.name);
+    if (reg.empty()) reg = region(g.name);
+    const std::vector<std::string> order = regionOrder(reg);
     if (wantArt) {
-      bool ok = fetchLbImage(lbPick(lb, lbId, "F", reg), artPath(sys, g.name));
-      if (!ok) { std::vector<uint8_t> png; for (const std::string& n : tries) if (fetchArt(sys, n, png)) { ok = writeFile(artPath(sys, g.name), png); break; } }  // libretro's front
-      const bool back = ok && fetchLbImage(lbPick(lb, lbId, "B", reg), backPath(sys, g.name));
-      const bool spine = ok && fetchLbImage(lbPick(lb, lbId, "S", reg), spinePath(sys, g.name));
-      logf("boxart: %s -> %s%s%s%s", g.name.c_str(), ok ? "front" : "not found", back ? ", back" : "", spine ? ", spine" : "", lg ? (", LaunchBox: " + lg->name).c_str() : "");
+      const Json* medias = jeu ? jeu->get("medias") : nullptr;
+      const Json* front = pickMedia(medias, "box-2D", order);
+      const std::string fr = front ? str(front, "region") : "";
+      bool ok = fetchMedia(front, artPath(sys, g.name));
+      // the back and the side from the front's region when there are (the same box)
+      const bool back = ok && fetchMedia(pickMedia(medias, "box-2D-back", order, fr), backPath(sys, g.name));
+      const bool side = ok && fetchMedia(pickMedia(medias, "box-2D-side", order, fr), spinePath(sys, g.name));
+      if (!back) remove(backPath(sys, g.name).c_str());
+      if (!side) remove(spinePath(sys, g.name).c_str());
+      logf("boxart: %s -> %s%s%s%s", g.name.c_str(), !jeu ? "not in ScreenScraper" : ok ? "front" : "no box art", back ? ", back" : "", side ? ", side" : "",
+           fr.empty() ? "" : (" (" + fr + ")").c_str());
       if (ok) { found++; remove(missPath(sys, g.name).c_str()); }
       else { missing++; std::vector<uint8_t> none; writeFile(missPath(sys, g.name), none); }
     }
+    if (s_cancel) break;  // (no details file: the game is looked up again in full next time)
     if (wantInfo) {
-      // the TV system: the serial's (PS2), else the official name's region, else the file name's
-      std::string tv = tvSystemOfSerial(ser);
-      if (tv.empty()) tv = tvSystem(tries.front());
-      if (tv.empty()) tv = tvSystem(g.name);
-      writeInfo(sys, g.name, cleanTitle(tries.front()), lg, tv);
+      std::string title = jeu ? pickText(jeu->get("noms"), "region", order) : "", year, genre, bio;
+      if (jeu) {
+        const std::string date = pickText(jeu->get("dates"), "region", order);
+        year = date.substr(0, 4);
+        if (const Json* gs = jeu->get("genres")) if (gs->isArr()) {
+          const Json* best = nullptr;
+          for (const Json& gg : gs->a) if (str(&gg, "principale") == "1") { best = &gg; break; }
+          if (!best && !gs->a.empty()) best = &gs->a[0];
+          if (best) genre = pickText(best->get("noms"), "langue", {"en"});
+        }
+        bio = pickText(jeu->get("synopsis"), "langue", {"en"});
+      }
+      if (title.empty()) title = stem(g.name);
+      writeInfo(sys, g.name, title, jeu ? str(jeu->get("developpeur"), "text") : "", jeu ? str(jeu->get("editeur"), "text") : "", year, genre, bio, tv);
     }
-    if (wantSnap) {  // a gameplay screenshot
-      bool ok = false; std::vector<uint8_t> png;
-      for (const std::string& n : tries) if (fetchSnap(sys, n, png)) { ok = writeFile(snapPath(sys, g.name), png); break; }
-      if (ok) remove(snapMissPath(sys, g.name).c_str()); else { std::vector<uint8_t> none; writeFile(snapMissPath(sys, g.name), none); }
-      logf("boxart: %s: screenshot %s", g.name.c_str(), ok ? "found" : "not found");
-    }
+    logf("boxart: %s: %.1f s", g.name.c_str(), armTicksToNs(armGetSystemTick() - t0) / 1e9);
     st.found = found; st.missing = missing; st.done++;
   }
+  closeConnections();
   st.current[0] = 0;
-  st.message = !haveDb && !haveLb && found == 0 ? "Box art: no connection to the art server" :
+  st.message = !stopWhy.empty() ? "Box art: " + stopWhy :
                std::to_string(found) + " box art found" + (missing ? ", " + std::to_string(missing) + " not found" : "");
   st.running = false;
 }
@@ -570,19 +454,27 @@ static bool netUp() {
   state = cr == CURLE_OK ? 1 : -1;
   return state > 0;
 }
+static Thread s_thread; static bool s_made = false;
+// The app's exit: a download still running is cancelled and its thread waited for (it must not outlive the program:
+// hbloader runs the next one in this same process). Its game is left without a details file, so it is redone.
+void stop() {
+  if (!s_made) return;
+  s_cancel = true;  // ends a transfer in progress (abortIfCancelled) and the loop
+  threadWaitForExit(&s_thread); threadClose(&s_thread); s_made = false;
+  s_cancel = false;
+}
 bool start(const System& sys, std::vector<Game> games, bool again, std::function<bool(const Game&, std::vector<uint8_t>&)> readFile, int limit) {
   if (st.running) return false;
   if (!netUp()) { st.message = "Box art: the network could not be started"; return false; }
   st.total = (int)games.size(); st.done = 0; st.found = 0; st.missing = 0; st.phase = 0; st.message.clear();
   st.running = true;
-  static Thread t; static bool made = false;
-  if (made) { threadWaitForExit(&t); threadClose(&t); made = false; }
+  if (s_made) { threadWaitForExit(&s_thread); threadClose(&s_thread); s_made = false; }
   Job* j = new Job{sys, std::move(games), again, std::move(readFile), limit};
-  Result rc = threadCreate(&t, threadMain, j, nullptr, 1024 * 1024, 0x2C, -2);  // 1 MB of stack
-  if (R_SUCCEEDED(rc)) rc = threadStart(&t);
+  Result rc = threadCreate(&s_thread, threadMain, j, nullptr, 1024 * 1024, 0x2C, -2);  // 1 MB of stack
+  if (R_SUCCEEDED(rc)) rc = threadStart(&s_thread);
   logf("boxart: thread 0x%x", rc);
   if (R_FAILED(rc)) { delete j; st.running = false; st.message = "Box art: could not start"; return false; }
-  made = true;
+  s_made = true;
   return true;
 }
 

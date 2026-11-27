@@ -27,6 +27,7 @@ static const CoreApi* C = &QUICKNES_CORE;
 #include "boxart.h"
 extern "C" unsigned char* stbi_load(const char* filename, int* x, int* y, int* comp, int req_comp);
 extern "C" void stbi_image_free(void* retval_from_stbi_load);
+extern "C" int stbi_info(const char* filename, int* x, int* y, int* comp);
 #include <minizip/unzip.h>
 
 #ifndef APP_VERSION
@@ -677,11 +678,12 @@ static void pressFooter(int i) { footFlash = footPending = i; footFlashUntil = n
 // ---- Box art (boxart.h): found on the console, shown on a 3D box beside the game list ----
 static boxart::System artSystem() {
   boxart::System s;
-  s.dbName = "Nintendo - Nintendo Entertainment System";
-  s.repo = "Nintendo_-_Nintendo_Entertainment_System";
-  s.lbPlatform = "Nintendo Entertainment System";
+  s.softname = "SW2NES";
+  s.ssSystemId = 3;  // ScreenScraper's system ID
   s.dataDir = DATA_DIR;
-  s.crcRange = nullptr;  // No-Intro's NES entries are the whole .nes file, header included
+  // ScreenScraper's NES checksums leave out the 16-byte iNES header: with it the lookup misses and the server
+  // falls back to a search by name (about 15 s a game instead of about 2)
+  s.crcRange = [](const std::vector<uint8_t>& f, size_t& off, size_t& len) { if (f.size() > 16 && f[0] == 'N' && f[1] == 'E' && f[2] == 'S' && f[3] == 0x1A) { off = 16; len = f.size() - 16; } };
   return s;
 }
 // Downloaded titles, by file name ("" when a game has none), read once from its details file.
@@ -728,12 +730,16 @@ struct ArtTex {
   gfx::Image* img = nullptr; gfx::Image* back = nullptr; gfx::Image* spineImg = nullptr;  // box front, back, spine
   gfx::Image* snap = nullptr;  // a gameplay screenshot
   Color spine{0.2f, 0.2f, 0.25f, 1}; bool tried = false;
+  Color sideColor{0, 0, 0, 1};  // the edges without an image: black, or the side image's average colour
+  float sideRatio = 0;  // the side image's short edge against its long one (the box's depth against its length), 0 without one
   bool hasInfo = false; string title, line, line2, bio, source;  // details (boxart::infoPath): publisher; year and genre
 };
 static std::map<string, ArtTex> artCache;
 // An image file (JPEG or PNG) as a texture; px gets its pixels (RGBA) when asked.
 static gfx::Image* loadArtImage(const string& path, vector<uint32_t>* px = nullptr, int* w = nullptr, int* h = nullptr) {
   int iw = 0, ih = 0, n = 0;
+  // a damaged file: refused before decoding when its size is absurd (downloads are at most 640 px)
+  if (!stbi_info(path.c_str(), &iw, &ih, &n) || iw <= 0 || ih <= 0 || iw > 4096 || ih > 4096) return nullptr;
   unsigned char* d = stbi_load(path.c_str(), &iw, &ih, &n, 4);
   if (!d) return nullptr;
   gfx::Image* im = gfx::imageCreateSmooth(iw, ih, (const uint32_t*)d);
@@ -761,7 +767,17 @@ static ArtTex& artFor(const string& name) {
   a.img = loadArtImage(boxart::artPath(artSystem(), name), &px, &w, &h);
   if (!a.img) { record("art: %s: no art", name.c_str()); return a; }
   a.back = loadArtImage(boxart::backPath(artSystem(), name));
-  a.spineImg = loadArtImage(boxart::spinePath(artSystem(), name));
+  {  // the side: its proportions give the box's depth, its average colour the two plain edges
+    vector<uint32_t> spx; int sw = 0, sh = 0;
+    a.spineImg = loadArtImage(boxart::spinePath(artSystem(), name), &spx, &sw, &sh);
+    if (a.spineImg && sw > 0 && sh > 0) {
+      a.sideRatio = (float)std::min(sw, sh) / std::max(sw, sh);
+      double r = 0, g = 0, b = 0;
+      for (uint32_t q : spx) { r += q & 255; g += (q >> 8) & 255; b += (q >> 16) & 255; }
+      const double n = (double)spx.size() * 255;
+      a.sideColor = Color{(float)(r / n), (float)(g / n), (float)(b / n), 1};
+    }
+  }
   record("art: %s: %dx%d front%s%s", name.c_str(), w, h, a.back ? ", back" : "", a.spineImg ? ", spine" : "");
   // the top and bottom: the front's left edge, averaged and darkened
   double r = 0, g = 0, b = 0; const int edge = std::max(1, w / 30);
@@ -1594,9 +1610,9 @@ static vector<SettingItem> settingsItems() {
       {"Theme", [] { vector<string> v; for (const Theme& t : THEMES) v.push_back(t.name); return v; }, [] { return themeIndex; }, [](int v) { applyTheme(v); }},
       {"Game details panel", [] { return OFF_ON; }, [] { return detailsPanel ? 1 : 0; }, [](int v) { detailsPanel = v != 0; }},
       {"Game names", [] { return vector<string>{"Title", "File name"}; }, [] { return gameTitles ? 0 : 1; }, [](int v) { gameTitles = v == 0; orderRoms(); }},
-      {"Download missing info", [] { return vector<string>{boxart::status().running && boxArtRow == 0 ? boxArtProgress() : string("Press {A}")}; }, [] { return 0; },
+      {"Download missing box art and descriptions", [] { return vector<string>{boxart::status().running && boxArtRow == 0 ? boxArtProgress() : string("Press {A}")}; }, [] { return 0; },
        [](int) { if (settingsByA && !boxart::status().running) { artCache.clear(); startBoxArt(false); } }},
-      {"Download all info again", [] { return vector<string>{boxart::status().running && boxArtRow == 1 ? boxArtProgress() : string("Press {A}")}; }, [] { return 0; },
+      {"Download all box art and descriptions", [] { return vector<string>{boxart::status().running && boxArtRow == 1 ? boxArtProgress() : string("Press {A}")}; }, [] { return 0; },
        [](int) { if (settingsByA && !boxart::status().running) { artCache.clear(); startBoxArt(true); } }},
       {"On-screen Menu button", [] { return MENU_BUTTON_MODES; }, [] { return menuButtonMode; }, [](int v) { menuButtonMode = v; }},
       {"UI size", [] { return vector<string>{"Compact", "Normal"}; }, [] { return touchControls ? 1 : 0; }, [](int v) { touchControls = v != 0; ROW_H = touchControls ? 72 : 40; }},
@@ -1893,14 +1909,16 @@ static void drawArtPanel(float x, float y, float w, float h, const Rom* rom) {
     const float yaw = swing + artYaw, pitch = 6 + artPitch;
     // for now (until the ScreenScraper sides): the front's art on a black box
     gfx::clip((int)x + 2, (int)y + 2, (int)w - 4, (int)h - 4);  // never past the panel's border, however it is turned
-    gfx::box3D(a.img, nullptr, nullptr, boxCX, boxCY, fw, fh, fh * boxDepthRatio(boxart::region(rom->name)), yaw, pitch, Color{0, 0, 0, 1});  // pure black
+    // the box's depth: from its side image's proportions (ScreenScraper), else a typical box's
+    const float depth = a.sideRatio > 0 ? std::max(fw, fh) * std::min(0.35f, std::max(0.03f, a.sideRatio)) : fh * boxDepthRatio(boxart::region(rom->name));
+    gfx::box3D(a.img, a.back, a.spineImg, boxCX, boxCY, fw, fh, depth, yaw, pitch, a.sideColor);
     gfx::noClip();
     addMoveHit(x, y, boxHitW, std::max(boxH, boxBottom - y), [](float dx, float dy) { artYaw += dx * 0.6f; artPitch -= dy * 0.6f; artTouchedAt = nowMs(); });
   } else {
     const string msg = boxart::status().running ? boxArtProgress() : a.hasInfo ? "No box art found" : "";
     if (!a.hasInfo && !boxart::status().running) {  // nothing at all yet: say where to get it
       float my = y + 20;
-      for (auto& l : wrap("No box art or description. Go to Settings to download missing info.", w - 2 * 16, 17)) { gfx::text(l, x + 16, my, 17, col(C_DIM)); my += 24; }
+      for (auto& l : wrap("No box art or description. Go to Settings to download missing box art and descriptions.", w - 2 * 16, 17)) { gfx::text(l, x + 16, my, 17, col(C_DIM)); my += 24; }
       return;
     }
     textMid(msg, x + (w - gfx::textWidth(msg, 16)) / 2, y + 20, 22, 16, col(C_DIM));
@@ -1945,7 +1963,7 @@ static void drawArtPanel(float x, float y, float w, float h, const Rom* rom) {
   }
   bioScrollMax = 0;
   if (!a.hasInfo) {
-    for (auto& l : wrap("No description. Go to Settings to download missing info.", tw, 17)) { if (ty + 24 > bottom) break; gfx::text(l, x + pad, ty + 4, 17, col(C_DIM)); ty += 24; }
+    for (auto& l : wrap("No description. Go to Settings to download missing box art and descriptions.", tw, 17)) { if (ty + 24 > bottom) break; gfx::text(l, x + pad, ty + 4, 17, col(C_DIM)); ty += 24; }
     return;
   }
   if (a.bio.empty()) { if (ty + 24 <= bottom) gfx::text("No description found", x + pad, ty + 4, 17, col(C_DIM)); return; }
@@ -2305,14 +2323,19 @@ static void drawSettings() {
     // tap: select, then act (A); on a value, its left half goes back, its right half forward
     addHit(rx, ry, rw, SET_ROW_H, [i] { if (settingsIndex == i) touchPress |= B_A; else settingsIndex = i; });
     if (i < n) {
-      textMid(SETTINGS_ITEMS[i].label, rx + 16, ry, SET_ROW_H, rowText(), col(C_TEXT));
       vector<string> ch = SETTINGS_ITEMS[i].choices();
       if (!SETTINGS_ITEMS[i].set) {  // information only (Version)
         const string& v = ch[0];
+        textMid(SETTINGS_ITEMS[i].label, rx + 16, ry, SET_ROW_H, rowText(), col(C_TEXT));
         textMid(v, rx + rw - 12 - gfx::textWidth(v, rowText()), ry, SET_ROW_H, rowText(), col(C_DIM));
         continue;
       }
-      const float vw = valueBox(ch[SETTINGS_ITEMS[i].get()], rx + rw - 12, ry, SET_ROW_H, rowText(), active);
+      // the value at most 45% of the row (a long one, e.g. a download's progress and title, ends in "..."),
+      // the label in what is left, so the two never overlap
+      string val = ch[SETTINGS_ITEMS[i].get()];
+      if (val.find('{') == string::npos) val = gfx::ellipsize(val, rw * 0.45f - 40, rowText());
+      const float vw = valueBox(val, rx + rw - 12, ry, SET_ROW_H, rowText(), active);
+      textMid(gfx::ellipsize(SETTINGS_ITEMS[i].label, rw - 12 - vw - 16 - 24, rowText()), rx + 16, ry, SET_ROW_H, rowText(), col(C_TEXT));
       if (ch.size() > 1) {
         addHit(rx + rw - 12 - vw - 10, ry, vw + 22, SET_ROW_H, [i] { settingsIndex = i; touchPress |= B_RIGHT; });  // a tap: the next choice (a cycle)
       }
@@ -2891,6 +2914,7 @@ int main(int argc, char** argv) {
 
   loadSettings();
   loadPlaytime();
+  boxart::cleanOldArt(artSystem());  // (once: the art of earlier builds, from other sources)
   loadDateFormat();
   rebuildSettings();
   scan();
@@ -2998,6 +3022,7 @@ int main(int argc, char** argv) {
   }
 
   if (running) quitGame();
+  boxart::stop();  // a download in progress: cancelled, its thread ended before the program is (its game is redone next time)
   saveSettings();
   gfx::imageDestroy(graphImage);
   gfx::pictureDestroy(picture);

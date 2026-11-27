@@ -51,10 +51,11 @@ app's file cannot be replaced.)
 - Two players, with separate button mapping and turbo for each
 - Game list with All / Favourites / Recent tabs, search, sorting (name, last played, date added),
   Last Played dates and time played; games are found in subfolders of the ROM folder too
-- Box art and game details, downloaded on the console (no account needed) from the LaunchBox
-  Games Database, matched by the ROM's checksum (No-Intro). A details panel beside the game list shows the
-  box in 3D (drag to turn it), the publisher, year, genre, region (NTSC / PAL / NTSC-J) and
-  description (Settings > App > Game details panel; Download missing info). With details
+- Box art and game details, downloaded on the console from [ScreenScraper](https://www.screenscraper.fr)
+  (no account needed), matched by the ROM's checksum (without the iNES header), name and size. A details panel beside the
+  game list shows the box in 3D with its front, back and sides (drag to turn it), the publisher,
+  year, genre, region (NTSC / PAL / NTSC-J) and description (Settings > App > Game details panel;
+  Download missing box art and descriptions). With details
   downloaded, the game list shows each game's proper title (Settings > App > Game names: Title or
   File name)
 - Themes: Dark, Light, Black, Blue, Purple, Red, Green, Orange, Retro and Retro Colour
@@ -90,7 +91,7 @@ Everything can also be tapped.
 ## Building
 
 Requirements: [devkitPro pacman](https://devkitpro.org/wiki/devkitPro_pacman) with
-`switch-dev`, `switch-freetype` and `switch-zlib`, and the Switch 2 devkit
+`switch-dev`, `switch-freetype`, `switch-zlib`, `switch-curl` and `switch-mbedtls`, and the Switch 2 devkit
 (`sh install.sh` from ounce-devkit).
 
 ```sh
@@ -99,6 +100,11 @@ make -C hbmenu
 ```
 
 This builds `hbmenu/sw2nes.nro`.
+
+Box art downloads use [ScreenScraper](https://www.screenscraper.fr) and need a ScreenScraper
+developer account, which is not in this repository: put `devid=...` and `devpassword=...` on two
+lines in `~/.config/sw2/screenscraper.txt` and run `tools/make_ss_dev.sh`, which writes the
+ignored `hbmenu/source/ss_dev.h`. Without it the app builds and runs but cannot download box art.
 
 ## Layout
 

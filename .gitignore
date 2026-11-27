@@ -16,3 +16,4 @@ hbmenu/*.nro
 hbmenu/*.nacp
 hbmenu/*.elf
 *.o
+hbmenu/source/ss_dev.h
