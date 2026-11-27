@@ -152,6 +152,25 @@ float textWidth(const std::string& s, float size, Font f) {
   return w / UI_SCALE;
 }
 
+void textInk(const std::string& s, float size, Font f, float& x0, float& y0, float& x1, float& y1) {
+  const float S = size * UI_SCALE;
+  const int px = (int)(S + 0.5f);
+  FT_Face face = faces[f];
+  FT_Set_Pixel_Sizes(face, 0, px);
+  const float ascender = face->size->metrics.ascender / 64.0f, descender = -face->size->metrics.descender / 64.0f;
+  const float baseline = (S * 1.25f - (ascender + descender)) / 2 + ascender;  // as text() puts it (before rounding)
+  float pen = 0, ax0 = 1e9f, ay0 = 1e9f, ax1 = -1e9f, ay1 = -1e9f;
+  for (size_t i = 0; i < s.size();) {
+    const Glyph& g = glyph(f, px, nextCodepoint(s, i));
+    if (g.w > 0) {
+      ax0 = std::min(ax0, pen + g.left); ax1 = std::max(ax1, pen + g.left + g.w);
+      ay0 = std::min(ay0, baseline - g.top); ay1 = std::max(ay1, baseline - g.top + g.h);
+    }
+    pen += g.advance;
+  }
+  if (ax0 > ax1) { ax0 = ax1 = pen / 2; ay0 = ay1 = baseline; }  // (nothing drawn: a point in the middle)
+  x0 = ax0 / UI_SCALE; y0 = ay0 / UI_SCALE; x1 = ax1 / UI_SCALE; y1 = ay1 / UI_SCALE;
+}
 std::string ellipsize(const std::string& s, float width, float size, Font f) {
   if (textWidth(s, size, f) <= width) return s;
   std::string t = s;
@@ -165,6 +184,73 @@ std::string ellipsize(const std::string& s, float width, float size, Font f) {
 static std::vector<float> verts;
 
 static void setScreen(GLint loc) { glUniform2f(loc, SCREEN_W, SCREEN_H); }
+bool textShadow = true;
+// Draws the glyph quads built in verts: first the shadow (a copy 1 screen pixel down and right; dark behind light
+// text, faintly light behind dark text, as strong as the text is opaque), then the text.
+static void drawTextVerts(Color c) {
+  if (verts.empty()) return;
+  glUseProgram(texProg); setScreen(tScreen);
+  glUniform1i(tMode, 1);
+  glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D, atlas); glUniform1i(tTex, 0);
+  glBindBuffer(GL_ARRAY_BUFFER, vbo);
+  if (textShadow && c.a > 0.05f) {  // two layers, 2 then 1 screen pixels down and right: soft, but clearly there
+    static std::vector<float> sv;
+    const float lum = 0.299f * c.r + 0.587f * c.g + 0.114f * c.b;
+    const bool dark = lum > 0.45f;  // light text: a dark shadow; dark text: a light one
+    for (int off = 2; off >= 1; off--) {
+      sv = verts;
+      for (size_t i = 0; i < sv.size(); i += 4) { sv[i] += off; sv[i + 1] += off; }
+      const float a = dark ? (off == 2 ? 0.55f : 0.7f) : (off == 2 ? 0.35f : 0.45f);
+      if (dark) glUniform4f(tColor, 0, 0, 0, a * c.a); else glUniform4f(tColor, 1, 1, 1, a * c.a);
+      glBufferData(GL_ARRAY_BUFFER, sv.size() * sizeof(float), sv.data(), GL_STREAM_DRAW);
+      glDrawArrays(GL_TRIANGLES, 0, (GLsizei)(sv.size() / 4));
+    }
+  }
+  glUniform4f(tColor, c.r, c.g, c.b, c.a);
+  glBufferData(GL_ARRAY_BUFFER, verts.size() * sizeof(float), verts.data(), GL_STREAM_DRAW);
+  glDrawArrays(GL_TRIANGLES, 0, (GLsizei)(verts.size() / 4));
+}
+// The ink box in screen pixels, relative to a whole-pixel pen and baseline (whole numbers: glyphs are bitmaps).
+static void inkPx(const std::string& s, int px, Font f, float& x0, float& y0, float& x1, float& y1) {
+  float pen = 0; x0 = y0 = 1e9f; x1 = y1 = -1e9f;
+  for (size_t i = 0; i < s.size();) {
+    const Glyph& g = glyph(f, px, nextCodepoint(s, i));
+    if (g.w > 0) { x0 = std::min(x0, pen + g.left); x1 = std::max(x1, pen + g.left + g.w); y0 = std::min(y0, (float)-g.top); y1 = std::max(y1, (float)(g.h - g.top)); }
+    pen += g.advance;
+  }
+  if (x0 > x1) { x0 = x1 = pen / 2; y0 = y1 = 0; }
+}
+// Draws s with its pen and baseline at these whole screen pixels.
+static void textAtPx(const std::string& s, float pen, float baseline, int px, Color c, Font f) {
+  verts.clear();
+  for (size_t i = 0; i < s.size();) {
+    const Glyph& g = glyph(f, px, nextCodepoint(s, i));
+    if (g.w > 0) {
+      float x0 = pen + g.left, y0 = baseline - g.top, x1 = x0 + g.w, y1 = y0 + g.h;
+      float q[] = {x0, y0, g.u0, g.v0, x1, y0, g.u1, g.v0, x0, y1, g.u0, g.v1,
+                   x1, y0, g.u1, g.v0, x1, y1, g.u1, g.v1, x0, y1, g.u0, g.v1};
+      verts.insert(verts.end(), q, q + 24);
+    }
+    pen += g.advance;
+  }
+  drawTextVerts(c);
+}
+void textCentered(const std::string& s, float mx, float my, float size, Color c, Font f) {
+  const int px = (int)(size * UI_SCALE + 0.5f);
+  float x0, y0, x1, y1; inkPx(s, px, f, x0, y0, x1, y1);
+  textAtPx(s, roundf(mx * UI_SCALE - (x0 + x1) / 2), roundf(my * UI_SCALE - (y0 + y1) / 2), px, c, f);
+}
+void badge(const std::string& label, float x, float y, float w, float h, float radius, Color fill, float size, Color ink, Font f, float border, Color borderColor) {
+  const int px = (int)(size * UI_SCALE + 0.5f);
+  float x0, y0, x1, y1; inkPx(label, px, f, x0, y0, x1, y1);
+  const int iw = (int)(x1 - x0), ih = (int)(y1 - y0);
+  float X = roundf(x * UI_SCALE), Y = roundf(y * UI_SCALE), W = roundf(w * UI_SCALE), H = roundf(h * UI_SCALE);
+  if (((int)W - iw) & 1) W -= 1;  // the same parity as the ink: an exact middle
+  if (((int)H - ih) & 1) H -= 1;
+  const float r = std::min(radius * UI_SCALE, std::min(W, H) / 2);
+  rect(X / UI_SCALE, Y / UI_SCALE, W / UI_SCALE, H / UI_SCALE, fill, r / UI_SCALE, border, borderColor);
+  textAtPx(label, X + (W - iw) / 2 - x0, Y + (H - ih) / 2 - y0, px, ink, f);
+}
 
 float text(const std::string& s, float x, float y, float size, Color c, Font f) {
   x *= UI_SCALE; y *= UI_SCALE; size *= UI_SCALE;
@@ -185,14 +271,7 @@ float text(const std::string& s, float x, float y, float size, Color c, Font f) 
     }
     pen += g.advance;
   }
-  if (!verts.empty()) {
-    glUseProgram(texProg); setScreen(tScreen);
-    glUniform1i(tMode, 1); glUniform4f(tColor, c.r, c.g, c.b, c.a);
-    glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D, atlas); glUniform1i(tTex, 0);
-    glBindBuffer(GL_ARRAY_BUFFER, vbo);
-    glBufferData(GL_ARRAY_BUFFER, verts.size() * sizeof(float), verts.data(), GL_STREAM_DRAW);
-    glDrawArrays(GL_TRIANGLES, 0, (GLsizei)(verts.size() / 4));
-  }
+  drawTextVerts(c);
   return (pen - x) / UI_SCALE;
 }
 
@@ -204,6 +283,7 @@ static void quad(float x, float y, float w, float h, float u0, float v0, float u
   glDrawArrays(GL_TRIANGLES, 0, 6);
 }
 
+float borderScale = 1;
 void rect(float x, float y, float w, float h, Color fill, float radius, float border, Color bc) {
   if (w <= 0 || h <= 0) return;
   // To whole screen pixels (the UI is drawn 1.25x): edges and borders that land between pixels
@@ -211,7 +291,7 @@ void rect(float x, float y, float w, float h, Color fill, float radius, float bo
   const float x2 = roundf((x + w) * UI_SCALE), y2 = roundf((y + h) * UI_SCALE);
   x = roundf(x * UI_SCALE); y = roundf(y * UI_SCALE); w = x2 - x; h = y2 - y;
   if (w <= 0 || h <= 0) return;
-  radius *= UI_SCALE; border = border > 0 ? fmaxf(1.0f, roundf(border * UI_SCALE)) : 0;
+  radius *= UI_SCALE; border = border > 0 ? fmaxf(1.0f, roundf(border * UI_SCALE * borderScale)) : 0;
   glUseProgram(rectProg); setScreen(rScreen);
   glUniform4f(rRect, x, y, w, h);
   float r = radius; if (r > w / 2) r = w / 2; if (r > h / 2) r = h / 2;

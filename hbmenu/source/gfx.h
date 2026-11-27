@@ -40,6 +40,19 @@ void noClip();
 // Fonts: 0 = regular, 1 = bold, 2 = monospace.
 enum Font { REGULAR = 0, BOLD = 1, MONO = 2 };
 float textWidth(const std::string& s, float size, Font f = REGULAR);
+// The ink of a string (the glyphs' own pixels, not their advance boxes), relative to where text() at (0, 0) puts
+// it: for centring short labels exactly (a capital L's box has empty room on its right, and capitals none below).
+// Borders (the border of rect) this much thicker: set by the theme (the Retro themes draw theirs bolder).
+extern float borderScale;
+// A soft shadow behind all text, 1 screen pixel down and right (on by default): easier to read on any background.
+extern bool textShadow;
+void textInk(const std::string& s, float size, Font f, float& x0, float& y0, float& x1, float& y1);
+// A label with its ink centred on (mx, my) exactly: placed in whole screen pixels (no rounding through UI units).
+void textCentered(const std::string& s, float mx, float my, float size, Color c, Font f = REGULAR);
+// A rounded shape with a label exactly in its middle: the shape's pixel size is matched to the label's ink (one
+// pixel less where an even width would leave the label half a pixel off).
+void badge(const std::string& label, float x, float y, float w, float h, float radius, Color fill, float size, Color ink, Font f = REGULAR,
+           float border = 0, Color borderColor = Color{0, 0, 0, 0});
 // Draws one line with its top at y (line box of 1.25 * size); returns its width.
 float text(const std::string& s, float x, float y, float size, Color c, Font f = REGULAR);
 // Fits text into width with "...", for list rows.

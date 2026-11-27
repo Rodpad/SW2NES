@@ -3,4 +3,5 @@
 #define STBI_ONLY_JPEG
 #define STBI_ONLY_PNG
 #define STBI_NO_STDIO_WARNINGS
+#define STBI_NEON  // the ARM NEON loops (JPEG colour conversion and upsampling): covers decode faster
 #include "../third_party/stb/stb_image.h"

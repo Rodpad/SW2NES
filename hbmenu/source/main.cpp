@@ -13,6 +13,7 @@
 #include <algorithm>
 #include <functional>
 #include <map>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -52,7 +53,7 @@ enum { N_A = 1, N_B = 2, N_SELECT = 4, N_START = 8, N_UP = 16, N_DOWN = 32, N_LE
 
 // Colours: set by the theme (Settings -> App -> Theme).
 static uint32_t C_BG = 0x0b0d12, C_PANEL = 0x151924, C_LINE = 0x2a3142, C_TEXT = 0xeef1f7, C_DIM = 0x9aa3b5, C_ACCENT = 0xe4463b, C_SEL = 0x2b3550;
-struct Theme { const char* name; uint32_t bg, panel, line, text, dim, accent, sel; uint32_t faceA = 0, faceB = 0, faceX = 0, faceY = 0; };  // face: button-icon colours (0: the usual)
+struct Theme { const char* name; uint32_t bg, panel, line, text, dim, accent, sel; uint32_t faceA = 0, faceB = 0, faceX = 0, faceY = 0; float border = 1; };  // border: how thick its borders are  // face: button-icon colours (0: the usual)
 static const Theme THEMES[] = {
     {"Dark", 0x0b0d12, 0x151924, 0x2a3142, 0xeef1f7, 0x9aa3b5, 0xe4463b, 0x2b3550},
     {"Light", 0xe6e9ef, 0xf7f8fa, 0xc5ccd8, 0x1b1f27, 0x566072, 0xd2382c, 0xd9e0ec},
@@ -62,16 +63,17 @@ static const Theme THEMES[] = {
     {"Red", 0x160a0b, 0x221113, 0x47242a, 0xfaeeee, 0xd0a5a8, 0xff4d4d, 0x3d1c21},
     {"Green", 0x08130d, 0x0f1f15, 0x21402c, 0xeaf8ef, 0x9fcab0, 0x3ccf6e, 0x173a24},
     {"Orange", 0x140e08, 0x21170d, 0x47331d, 0xfcf3ea, 0xd3b79c, 0xff8c2a, 0x3d2a16},
-    // Retro: the grey of the 16-bit console's case, charcoal text, its purple buttons as the accent
-    {"Retro", 0x1f1e23, 0x34333a, 0x6a6971, 0xffffff, 0xdcdbe2, 0xb4a6ff, 0x4a4073, 0x6650c8, 0x6650c8, 0xb3a5ef, 0xb3a5ef},
+    // Retro: the grey of the 16-bit console's case (black borders), charcoal text, its purple buttons as the accent
+    {"Retro", 0x1f1e23, 0x34333a, 0x000000, 0xffffff, 0xdcdbe2, 0xb4a6ff, 0x4a4073, 0x6650c8, 0x6650c8, 0xb3a5ef, 0xb3a5ef, 1.6f},
     // Retro Colour: the same greys, with the four coloured face buttons of the PAL and Japanese pads
-    {"Retro Colour", 0x1f1e23, 0x34333a, 0x6a6971, 0xffffff, 0xdcdbe2, 0xe0463e, 0x4a3a3c, 0xe0463e, 0xf2c230, 0x3f6fe0, 0x3caa55}};
+    {"Retro Colour", 0x1f1e23, 0x34333a, 0x000000, 0xffffff, 0xdcdbe2, 0xe0463e, 0x4a3a3c, 0xe0463e, 0xf2c230, 0x3f6fe0, 0x3caa55, 1.6f}};
 static const int THEME_COUNT = (int)(sizeof THEMES / sizeof THEMES[0]);
 static int themeIndex = 0;
 static uint32_t C_FACE[4] = {0, 0, 0, 0};  // A, B, X, Y icon colours of the theme (0: the usual)
 static void applyTheme(int i) {
   themeIndex = i >= 0 && i < THEME_COUNT ? i : 0;
   const Theme& t = THEMES[themeIndex];
+  gfx::borderScale = t.border;
   C_FACE[0] = t.faceA; C_FACE[1] = t.faceB; C_FACE[2] = t.faceX; C_FACE[3] = t.faceY;
   C_BG = t.bg; C_PANEL = t.panel; C_LINE = t.line; C_TEXT = t.text; C_DIM = t.dim; C_ACCENT = t.accent; C_SEL = t.sel;
 }
@@ -179,6 +181,13 @@ static bool debugLog = false;
 // Touch always works (taps and drags on every screen). "UI size" (Settings -> App): Compact, or
 // Normal with taller rows and larger row text (easier to tap).
 static bool gameTitles = true;  // the game list shows downloaded titles instead of file names (Settings -> App -> Game names)
+static bool gridView = true;  // the game list as a grid of box covers (Settings -> App -> Game list view); without the setting: grid if online
+static bool artAsked = false;  // asked once whether to download box art for games without it
+static int gridCols = 1, gridRowsShown = 1;
+// The grid scrolls smoothly (pixels, not rows): a drag follows the finger and a flick glides on; the D-pad and
+// paging slide it to the highlighted game.
+static float gridScroll = 0, gridScrollTo = 0, gridFlingV = 0, gridDragV = 0;
+static bool gridDragging = false;  // the grid's columns as last drawn (the D-pad moves by them)
 static bool detailsPanel = true;  // the game list's box art and description panel (Settings -> App)
 static bool touchControls = true;  // UI size: Normal (the default) or Compact  // the larger spacing
 // The in-game on-screen Menu button (Settings -> App): 0 when the game is touched (3 s), 1 always, 2 hidden.
@@ -261,6 +270,9 @@ static int stateSlot = 1, turbo = 0, paletteApplied = -1;
 static double toastUntil = 0, hintUntil = 0;
 static string toastText, messageText;
 static std::function<void()> messageThen;
+static std::function<void()> messageNo;  // a question (showQuestion): B or its second button
+static bool messageAsk = false;
+static string messageYesLabel, messageNoLabel;
 static int settingsIndex = 0, settingsTop = 0;
 
 static double nowMs() { return armTicksToNs(armGetSystemTick()) / 1e6; }
@@ -380,7 +392,7 @@ static Json settingsJson(const GameVals& g) {
   j.set("romSortByView", sorts); j.set("playHistory", strings(playHistory));
   j.set("lastPlayedDates", lastPlayedDates);
   j.set("romDir", Json::string(romDir));
-  j.set("advanced", Json::boolean(showAdvanced)); j.set("debugLog", Json::boolean(debugLog)); j.set("touch", Json::boolean(touchControls)); j.set("menuButton", Json::number(menuButtonMode)); j.set("detailsPanel", Json::boolean(detailsPanel)); j.set("gameTitles", Json::boolean(gameTitles)); j.set("theme", Json::number(themeIndex));
+  j.set("advanced", Json::boolean(showAdvanced)); j.set("debugLog", Json::boolean(debugLog)); j.set("touch", Json::boolean(touchControls)); j.set("menuButton", Json::number(menuButtonMode)); j.set("detailsPanel", Json::boolean(detailsPanel)); j.set("gridView", Json::boolean(gridView)); j.set("artAsked", Json::boolean(artAsked)); j.set("gameTitles", Json::boolean(gameTitles)); j.set("theme", Json::number(themeIndex));
   for (int pl = 0; pl < 2; pl++) { Json m = Json::array(); for (int i = 0; i < NPAD; i++) m.a.push_back(Json::number(padMap[pl][i])); j.set("padMap" + std::to_string(pl + 1), m); }
   {
     Json g = Json::object();
@@ -454,6 +466,8 @@ static void applySettingsJson(const Json& v) {
   if (const Json* d = v.get("touch")) if (d->isBool()) touchControls = d->b;
   menuButtonMode = pick(v.get("menuButton"), MENU_BUTTON_MODES.size(), menuButtonMode);
   if (const Json* d = v.get("detailsPanel")) if (d->isBool()) detailsPanel = d->b;
+  if (const Json* d = v.get("gridView")) if (d->isBool()) gridView = d->b;
+  if (const Json* d = v.get("artAsked")) if (d->isBool()) artAsked = d->b;
   if (const Json* d = v.get("gameTitles")) if (d->isBool()) gameTitles = d->b;
   applyTheme(pick(v.get("theme"), THEME_COUNT, themeIndex));
   ROW_H = touchControls ? 72 : 40;
@@ -467,12 +481,23 @@ static void applySettingsJson(const Json& v) {
 }
 static Json defaultSettings;  // the built-in defaults, captured before the settings file is read
 static bool displaySaved = false;  // the file chose a display mode (otherwise 120 Hz only where available)
+// Whether the console is online now (the system's own connection status; no request is made).
+static bool internetConnected() {
+  if (R_FAILED(nifmInitialize(NifmServiceType_User))) return false;
+  NifmInternetConnectionType type; u32 strength = 0; NifmInternetConnectionStatus status;
+  const bool ok = R_SUCCEEDED(nifmGetInternetConnectionStatus(&type, &strength, &status)) && status == NifmInternetConnectionStatus_Connected;
+  nifmExit();
+  return ok;
+}
 static void loadSettings() {
   for (int pl = 0; pl < 2; pl++) resetPadMap(pl);  // the standard layout, before the defaults are captured
   defaultSettings = settingsJson(gameValues());
   string t; Json v;
-  if (!readText(SETTINGS(), t) || !Json::parse(t, v) || v.type != Json::OBJ) return;
+  // the game list view, when not set yet: the grid of covers if the console is online (box art can be
+  // downloaded), else the list (offline players would only see empty covers)
+  if (!readText(SETTINGS(), t) || !Json::parse(t, v) || v.type != Json::OBJ) { gridView = internetConnected(); return; }
   applySettingsJson(v);
+  if (!v.get("gridView")) gridView = internetConnected();
   if (const Json* dates = v.get("lastPlayedDates"); dates && dates->type == Json::OBJ)
     lastPlayedDates = *dates;
   displaySaved = v.get("display") != nullptr;
@@ -735,7 +760,31 @@ struct ArtTex {
   bool hasInfo = false; string title, line, line2, bio, source;  // details (boxart::infoPath): publisher; year and genre
 };
 static std::map<string, ArtTex> artCache;
+// The grid's covers: the front image only, a few loaded each frame (no stall on a first view), at most
+// COVER_MAX kept (the longest unseen goes).
+static const float GRID_ASPECT = 0.72f;  // a cover slot's width against its height (NES boxes are portrait)
+struct Cover { gfx::Image* img = nullptr; bool tried = false; double used = 0; };  // tried: decoded (img, or none: no art)
+static std::map<string, Cover> coverCache;
+static const size_t COVER_MAX = 200;  // (the screen, and two pages above and below it, several times over)
+// New art downloaded: a cover is loaded again (all of them, or only those still without one), the old image kept
+// on screen until its new one is in, so nothing flashes.
+static void staleCovers(bool all) { for (auto& kv : coverCache) if (all || !kv.second.img) kv.second.tried = false; }
+// The details panel's textures are freed with the cache (earlier builds lost them each time new art arrived).
+static void clearArtCache() {
+  for (auto& kv : artCache) for (gfx::Image* im : {kv.second.img, kv.second.back, kv.second.spineImg, kv.second.snap}) if (im) gfx::imageDestroy(im);
+  artCache.clear();
+}
 // An image file (JPEG or PNG) as a texture; px gets its pixels (RGBA) when asked.
+// An image of one flat colour (a placeholder some art sources have, e.g. a plain green box back): no art.
+static bool plainImage(const vector<uint32_t>& px) {
+  if (px.size() < 64) return true;
+  double sum[3] = {0, 0, 0}, sq[3] = {0, 0, 0}; int n = 0;
+  for (size_t i = 0; i < px.size(); i += px.size() / 997 + 1, n++)
+    for (int k = 0; k < 3; k++) { const double v = (px[i] >> (8 * k)) & 255; sum[k] += v; sq[k] += v * v; }
+  double var = 0;
+  for (int k = 0; k < 3; k++) var += sq[k] / n - (sum[k] / n) * (sum[k] / n);
+  return var < 3 * 6 * 6;  // under about 6 levels of spread in each channel
+}
 static gfx::Image* loadArtImage(const string& path, vector<uint32_t>* px = nullptr, int* w = nullptr, int* h = nullptr) {
   int iw = 0, ih = 0, n = 0;
   // a damaged file: refused before decoding when its size is absurd (downloads are at most 640 px)
@@ -748,6 +797,131 @@ static gfx::Image* loadArtImage(const string& path, vector<uint32_t>* px = nullp
   if (h) *h = ih;
   stbi_image_free(d);
   return im;
+}
+// Covers are decoded (JPEG / PNG) on their own thread, the ones on screen first, then a page above and below;
+// the main thread only makes textures of them (a few a frame), so paging fast does not stall or show empty slots
+// for long.
+struct CoverJob { string name, path; };
+struct CoverDone { string name; int w = 0, h = 0; unsigned char* px = nullptr; };
+static Mutex coverMx; static CondVar coverCv;
+static vector<CoverJob> coverWanted;  // what to decode next, most wanted first (set again every frame)
+static vector<CoverDone> coverDone;   // decoded, waiting for their textures
+static std::set<string> coverBusy;    // being decoded now
+static const int COVER_THREADS = 3;
+static Thread coverThreads[COVER_THREADS]; static int coverThreadCount = 0; static bool coverThreadUp = false, coverStopping = false;
+static vector<string> coverWantNow;   // this frame's wanted covers, in order
+static void coverMain(void*) {
+  for (;;) {
+    mutexLock(&coverMx);
+    while (!coverStopping && coverWanted.empty()) condvarWait(&coverCv, &coverMx);
+    if (coverStopping) { mutexUnlock(&coverMx); return; }
+    const CoverJob job = coverWanted.front();
+    coverWanted.erase(coverWanted.begin());
+    coverBusy.insert(job.name);
+    mutexUnlock(&coverMx);
+    CoverDone d; d.name = job.name;
+    int iw = 0, ih = 0, n = 0;
+    if (stbi_info(job.path.c_str(), &iw, &ih, &n) && iw > 0 && ih > 0 && iw <= 4096 && ih <= 4096) d.px = stbi_load(job.path.c_str(), &d.w, &d.h, &n, 4);
+    mutexLock(&coverMx);
+    coverDone.push_back(d); coverBusy.erase(job.name);
+    mutexUnlock(&coverMx);
+  }
+}
+static void coverLoaderStart() {
+  if (coverThreadUp) return;
+  mutexInit(&coverMx); condvarInit(&coverCv); coverStopping = false;
+  // on the process's other cores (not the menu's own), one each where there are enough
+  u64 mask = 0; svcGetInfo(&mask, InfoType_CoreMask, CUR_PROCESS_HANDLE, 0);
+  const int own = (int)svcGetCurrentProcessorNumber();
+  vector<int> cores;
+  for (int c = 0; c < 64; c++) if ((mask >> c) & 1 && c != own) cores.push_back(c);
+  if (cores.empty()) cores.push_back(-2);
+  for (int i = 0; i < COVER_THREADS; i++) {
+    Thread& th = coverThreads[coverThreadCount];
+    if (R_SUCCEEDED(threadCreate(&th, coverMain, nullptr, nullptr, 256 * 1024, 0x2E, cores[i % cores.size()])) && R_SUCCEEDED(threadStart(&th))) coverThreadCount++;
+  }
+  coverThreadUp = coverThreadCount > 0;
+}
+// The app's exit: the thread ends before the program does (hbloader runs the next one in this process).
+static void coverLoaderStop() {
+  if (!coverThreadUp) return;
+  mutexLock(&coverMx); coverStopping = true; coverWanted.clear(); condvarWakeAll(&coverCv); mutexUnlock(&coverMx);
+  for (int i = 0; i < coverThreadCount; i++) { threadWaitForExit(&coverThreads[i]); threadClose(&coverThreads[i]); }
+  coverThreadCount = 0; coverThreadUp = false;
+  for (CoverDone& d : coverDone) if (d.px) stbi_image_free(d.px);
+  coverDone.clear();
+}
+// A cover wanted now (drawn, or a page away): its texture if made; asked for if not decoded yet.
+// The favourite mark: a yellow five-pointed star with a soft dark edge, drawn once into an image (4 x 4 samples
+// a pixel, so its edges are smooth); made again if the graphics were (SW2PS2 after a Vulkan game).
+static gfx::Image* starImg = nullptr;
+static gfx::Image* starImage() {
+  if (starImg) return starImg;
+  const int S = 96;
+  vector<uint32_t> px((size_t)S * S, 0);
+  auto inStar = [](float x, float y, float cx, float cy, float R) {  // even-odd test against the star's outline
+    float vx[10], vy[10];
+    for (int k = 0; k < 10; k++) { const float a = (-90.0f + k * 36.0f) * 3.14159265f / 180, r = (k & 1) ? R * 0.42f : R; vx[k] = cx + r * cosf(a); vy[k] = cy + r * sinf(a); }
+    bool in = false;
+    for (int i = 0, j = 9; i < 10; j = i++)
+      if (((vy[i] > y) != (vy[j] > y)) && (x < (vx[j] - vx[i]) * (y - vy[i]) / (vy[j] - vy[i]) + vx[i])) in = !in;
+    return in;
+  };
+  const float cx = S / 2.0f, cy = S / 2.0f + S * 0.04f, R = S * 0.5f;
+  for (int y = 0; y < S; y++) for (int x = 0; x < S; x++) {
+    int edge = 0, fill = 0;
+    for (int sy = 0; sy < 4; sy++) for (int sx = 0; sx < 4; sx++) {
+      const float fx = x + (sx + 0.5f) / 4, fy = y + (sy + 0.5f) / 4;
+      if (inStar(fx, fy, cx, cy, R * 0.86f)) fill++;
+      else if (inStar(fx, fy, cx, cy, R)) edge++;
+    }
+    const float f = fill / 16.0f, e = edge / 16.0f;
+    // yellow (f2c94c) over a dark edge (1a1300 at 60%)
+    const float a = f + e * 0.6f;
+    if (a <= 0) continue;
+    const float r = (0xf2 * f + 0x1a * e * 0.6f) / a, g = (0xc9 * f + 0x13 * e * 0.6f) / a, b = (0x4c * f + 0x00 * e * 0.6f) / a;
+    px[(size_t)y * S + x] = (uint32_t)r | ((uint32_t)g << 8) | ((uint32_t)b << 16) | ((uint32_t)(a * 255) << 24);
+  }
+  starImg = gfx::imageCreateSmooth(S, S, px.data());
+  return starImg;
+}
+static gfx::Image* coverFor(const string& name) {
+  Cover& c = coverCache[name];
+  c.used = nowMs();
+  if (!c.tried) coverWantNow.push_back(name);
+  return c.img;
+}
+static bool coverMissing(const string& name) { auto it = coverCache.find(name); return it != coverCache.end() && it->second.tried && !it->second.img; }
+// Once a frame: textures for what was decoded (a few), the wanted list handed over, the cache kept in size.
+static void coverFrame() {
+  if (!coverThreadUp) coverLoaderStart();
+  vector<CoverDone> got;
+  mutexLock(&coverMx);
+  const size_t take = std::min<size_t>(6, coverDone.size());
+  got.assign(coverDone.begin(), coverDone.begin() + take);
+  coverDone.erase(coverDone.begin(), coverDone.begin() + take);
+  coverWanted.clear();
+  std::set<string> queued;
+  for (const string& n : coverWantNow)
+    if (!queued.count(n) && !coverBusy.count(n)) { queued.insert(n); coverWanted.push_back(CoverJob{n, boxart::artPath(artSystem(), n)}); }
+  if (!coverWanted.empty()) condvarWakeAll(&coverCv);
+  mutexUnlock(&coverMx);
+  coverWantNow.clear();
+  for (CoverDone& d : got) {  // (a reload: the old image stays on screen until now)
+    auto it = coverCache.find(d.name);
+    if (it == coverCache.end()) { if (d.px) stbi_image_free(d.px); continue; }
+    Cover& c = it->second;
+    gfx::Image* fresh = d.px ? gfx::imageCreateSmooth(d.w, d.h, (const uint32_t*)d.px) : nullptr;
+    if (d.px) stbi_image_free(d.px);
+    if (c.img) gfx::imageDestroy(c.img);
+    c.img = fresh; c.tried = true;
+  }
+  while (coverCache.size() > COVER_MAX) {  // the longest unseen go
+    auto old = coverCache.begin();
+    for (auto it = coverCache.begin(); it != coverCache.end(); ++it) if (it->second.used < old->second.used) old = it;
+    if (old->second.img) gfx::imageDestroy(old->second.img);
+    coverCache.erase(old);
+  }
 }
 static ArtTex& artFor(const string& name) {
   ArtTex& a = artCache[name];
@@ -766,10 +940,15 @@ static ArtTex& artFor(const string& name) {
   vector<uint32_t> px; int w = 0, h = 0;
   a.img = loadArtImage(boxart::artPath(artSystem(), name), &px, &w, &h);
   if (!a.img) { record("art: %s: no art", name.c_str()); return a; }
-  a.back = loadArtImage(boxart::backPath(artSystem(), name));
+  {  // the back: not a flat placeholder
+    vector<uint32_t> bpx;
+    a.back = loadArtImage(boxart::backPath(artSystem(), name), &bpx);
+    if (a.back && plainImage(bpx)) { gfx::imageDestroy(a.back); a.back = nullptr; }
+  }
   {  // the side: its proportions give the box's depth, its average colour the two plain edges
     vector<uint32_t> spx; int sw = 0, sh = 0;
     a.spineImg = loadArtImage(boxart::spinePath(artSystem(), name), &spx, &sw, &sh);
+    if (a.spineImg && plainImage(spx)) { gfx::imageDestroy(a.spineImg); a.spineImg = nullptr; }  // (a flat placeholder)
     if (a.spineImg && sw > 0 && sh > 0) {
       a.sideRatio = (float)std::min(sw, sh) / std::max(sw, sh);
       double r = 0, g = 0, b = 0;
@@ -812,6 +991,7 @@ static void toggleFavourite(const string& name) {
   showToast(was ? "Removed from Favourites" : "Added to Favourites");
   if (listView == 1) orderRoms();
 }
+static bool artCheckPending = false;  // after a scan: see whether to offer the box art download (maybeAskArt)
 static void scan() {
   allRoms.clear();
   // One entry per game name (a ROM file wins over a .zip of the same name; the first found wins
@@ -828,6 +1008,7 @@ static void scan() {
   }
   orderRoms();
   if (selected >= (int)roms.size()) selected = std::max(0, (int)roms.size() - 1);
+  artCheckPending = true;
 }
 
 /* ---------------- Palettes ---------------- */
@@ -926,7 +1107,10 @@ static string scaleLabel(int i) {
 
 /* ---------------- Toasts and messages ---------------- */
 static void showToast(const string& t, double ms) { toastText = t; toastUntil = nowMs() + ms; }
-static void showMessage(const string& text, std::function<void()> then) { messageText = text; messageThen = then; mode = "message"; }
+static void showMessage(const string& text, std::function<void()> then) { messageText = text; messageThen = then; messageNo = nullptr; messageAsk = false; mode = "message"; }
+static void showQuestion(const string& text, const string& yes, const string& no, std::function<void()> onYes, std::function<void()> onNo) {
+  messageText = text; messageThen = onYes; messageNo = onNo; messageAsk = true; messageYesLabel = yes; messageNoLabel = no; mode = "message";
+}
 
 /* ---------------- Timing and stats ---------------- */
 static double shownTimes[601];
@@ -1608,12 +1792,13 @@ static vector<SettingItem> settingsItems() {
         else if (!debugLog && logFile) { fclose(logFile); logFile = nullptr; }
       }},
       {"Theme", [] { vector<string> v; for (const Theme& t : THEMES) v.push_back(t.name); return v; }, [] { return themeIndex; }, [](int v) { applyTheme(v); }},
+      {"Game list view", [] { return vector<string>{"List", "Grid"}; }, [] { return gridView ? 1 : 0; }, [](int v) { gridView = v == 1; }},
       {"Game details panel", [] { return OFF_ON; }, [] { return detailsPanel ? 1 : 0; }, [](int v) { detailsPanel = v != 0; }},
       {"Game names", [] { return vector<string>{"Title", "File name"}; }, [] { return gameTitles ? 0 : 1; }, [](int v) { gameTitles = v == 0; orderRoms(); }},
       {"Download missing box art and descriptions", [] { return vector<string>{boxart::status().running && boxArtRow == 0 ? boxArtProgress() : string("Press {A}")}; }, [] { return 0; },
-       [](int) { if (settingsByA && !boxart::status().running) { artCache.clear(); startBoxArt(false); } }},
+       [](int) { if (settingsByA && !boxart::status().running) startBoxArt(false); }},
       {"Download all box art and descriptions", [] { return vector<string>{boxart::status().running && boxArtRow == 1 ? boxArtProgress() : string("Press {A}")}; }, [] { return 0; },
-       [](int) { if (settingsByA && !boxart::status().running) { artCache.clear(); startBoxArt(true); } }},
+       [](int) { if (settingsByA && !boxart::status().running) startBoxArt(true); }},
       {"On-screen Menu button", [] { return MENU_BUTTON_MODES; }, [] { return menuButtonMode; }, [](int v) { menuButtonMode = v; }},
       {"UI size", [] { return vector<string>{"Compact", "Normal"}; }, [] { return touchControls ? 1 : 0; }, [](int v) { touchControls = v != 0; ROW_H = touchControls ? 72 : 40; }},
       {"Pair controllers", [] { return vector<string>{"Press {A}"}; }, [] { return 0; }, [](int) { if (settingsByA) pairControllers(); }},
@@ -1740,6 +1925,11 @@ static float glyphText(const string& s, float x, float y, float size, Color c, g
 static float textMid(const string& s, float x, float y, float h, float size, Color c, gfx::Font f = gfx::REGULAR) {
   return glyphText(s, x, y + (h - size * 1.25f) / 2, size, c, f);
 }
+// A button's letter or symbol (A, -, +, LS, x, F...): its ink centred on (mx, my), not its font box (a capital
+// has empty room on its right and none below; a minus sign sits at a letter's middle height, not the box's).
+static void inkMid(const string& s, float mx, float my, float size, Color c, gfx::Font f = gfx::REGULAR) {
+  gfx::textCentered(s, mx, my, size, c, f);  // (in whole screen pixels)
+}
 // "< value >" selector, right-aligned at xr; returns its width.
 static float valueBox(const string& t, float xr, float y, float h, float size, bool active) {
   Color c = col(active ? C_TEXT : C_DIM);
@@ -1800,14 +1990,21 @@ static float equalTabsWidth(const vector<string>& labels) {  // equal tabs, each
   return w * labels.size() + 8 * (labels.size() - 1);
 }
 static float tabsWidth(const vector<string>& labels) { float w = 0; for (auto& l : labels) w += tabWidth(l) + 8; return w - 8; }
+// A shoulder button's badge (the L / R tab markers): filled as the footer's button icons, fully round on its
+// outer side (the button's top corner) and nearly square on the side facing the tabs; L rounded on the left, R on
+// the right. Its letters centred on their ink, a unit toward the squared side, where the shape's weight is.
+static const float SHOULDER_W = 28, SHOULDER_GAP = 10;
+static void drawShoulder(const char* label, float bx, float cy, bool left) {
+  bx = roundf(bx);
+  const float h = 22, w = SHOULDER_W, by = roundf(cy + (tabH() - h) / 2);
+  gfx::rect(bx, by, w, h, col(C_DIM), h / 2);                                  // round all round,
+  gfx::rect(left ? bx + w / 2 : bx, by, w / 2, h, col(C_DIM), 3);              // then squared on the inner side
+  inkMid(label, bx + w / 2 + (left ? 1.0f : -1.0f), by + h / 2, label[1] ? 12 : 14, col(C_PANEL), gfx::BOLD);
+}
 static void drawTabBar(float cx, float cy, const vector<string>& labels, int sel, int focusTab, std::function<void(int)> onTab = nullptr, bool caps = true, float fillW = 0) {  // focusTab: the tab the cursor is on, -1 none; fillW: equal tabs across this width
   cx = roundf(cx); cy = roundf(cy);  // whole pixels: a 1 px border at a fractional x can vanish
-  auto cap = [&](const char* label, float bx) {
-    bx = roundf(bx);
-    gfx::rect(bx, cy + (tabH() - 20) / 2, 28, 20, Color{0, 0, 0, 0}, 6, 1, col(C_DIM));
-    textMid(label, bx + 28 / 2 - gfx::textWidth(label, 13, gfx::BOLD) / 2, cy + (tabH() - 20) / 2, 20, 13, col(C_DIM), gfx::BOLD);
-  };
-  if (caps) cap("L", cx);
+  auto cap = [&](const char* label, float bx, bool left) { drawShoulder(label, bx, cy, left); };
+  if (caps) cap(singleJoyConConnected ? "SL" : "L", cx, true);
   float tx = caps ? cx + 28 + 10 : cx;
   for (size_t i = 0; i < labels.size(); i++) {
     bool on = (int)i == sel, focus = (int)i == focusTab;
@@ -1818,24 +2015,49 @@ static void drawTabBar(float cx, float cy, const vector<string>& labels, int sel
     if (onTab) addHit(tx, cy - 6, w + 8, tabH() + 12, [onTab, i] { onTab((int)i); });
     tx += w + 8;
   }
-  if (caps) cap("R", tx + 2);
-  if (onTab && caps) {  // the L / R caps: previous / next
-    const int n = (int)labels.size();
-    addHit(cx - 6, cy - 6, 40, tabH() + 12, [onTab, sel, n] { onTab((sel - 1 + n) % n); });
-    addHit(tx - 4, cy - 6, 40, tabH() + 12, [onTab, sel, n] { onTab((sel + 1) % n); });
+  if (caps && !singleJoyConConnected) cap("R", tx + 2, false);  // (a single Joy-Con's SR pages instead)
+  if (onTab && caps) {  // the L / R caps: previous / next (a single Joy-Con's SL: next, round)
+    const int n = (int)labels.size(), back = singleJoyConConnected ? 1 : n - 1;
+    addHit(cx - 6, cy - 6, 40, tabH() + 12, [onTab, sel, n, back] { onTab((sel + back) % n); });
+    if (!singleJoyConConnected) addHit(tx - 4, cy - 6, 40, tabH() + 12, [onTab, sel, n] { onTab((sel + 1) % n); });
   }
 }
 // A tab row's Back button (Settings, the in-game menu): after a divider at the row's right end.
-static const float BACK_W = 132, BACK_GAP = 28;
+static const float BACK_W = 132, BACK_GAP = 12;  // (BACK_GAP: from the last tab; no divider)
+// The Back button at a tab row's right end (before its R badge): the B button's icon, as in the footer, and Back.
 static bool drawTabBack(float rowX, float rowW, float cy, bool focus, std::function<void()> tap) {
   const float bx = rowX + rowW - BACK_W;
-  gfx::rect(roundf(bx - BACK_GAP / 2) - 1, cy + 8, 2, tabH() - 16, col(C_LINE), 1);  // divider
   const bool held = touchHolding(bx, cy - 6, BACK_W, tabH() + 12), lit = focus || held;
   gfx::rect(bx, cy, BACK_W, tabH(), held ? col(C_ACCENT, 0.35f) : focus ? col(C_SEL) : Color{0, 0, 0, 0}, BTN_RADIUS, 1, col(lit ? C_ACCENT : C_LINE));
-  const string t = "{B} Back";
-  textMid(t, bx + (BACK_W - glyphTextWidth(t, TAB_TEXT)) / 2, cy, tabH(), TAB_TEXT, col(lit ? C_TEXT : C_DIM));
+  const float kw = 26, lw = gfx::textWidth("Back", TAB_TEXT), kx = roundf(bx + (BACK_W - (kw + 8 + lw)) / 2), ky = roundf(cy + (tabH() - kw) / 2);
+  const Color fill = C_FACE[1] ? gfx::rgb(C_FACE[1]) : col(C_DIM);  // (a theme's own B colour, as in the footer)
+  const float lum = C_FACE[1] ? (0.299f * ((C_FACE[1] >> 16) & 255) + 0.587f * ((C_FACE[1] >> 8) & 255) + 0.114f * (C_FACE[1] & 255)) / 255 : 0;
+  const Color ink = C_FACE[1] ? (lum > 0.6f ? gfx::rgb(0x1e1b2a) : gfx::rgb(0xffffff)) : col(C_PANEL);
+  if (singleJoyConConnected) { gfx::rect(kx, ky, kw, kw, fill, kw / 2); drawFaceGlyph(1, kx + (kw - glyphWidth(17)) / 2, ky + (kw - 17 * 1.25f) / 2, 17, ink); }
+  else gfx::badge("B", kx, ky, kw, kw, kw / 2, fill, 15, ink, gfx::BOLD);
+  textMid("Back", kx + kw + 8, cy, tabH(), TAB_TEXT, col(lit ? C_TEXT : C_DIM));
   addHit(bx, cy - 6, BACK_W, tabH() + 12, tap);
   return held;
+}
+// L / R through a tab row with a Back button: the tabs, then Back, and round again (Back is only highlighted).
+static void settingsStep(int d) {
+  const int n = (int)SETTINGS_CATS.size(), pos = settingsOnBack ? n : settingsCat, to = (pos + d + n + 1) % (n + 1);
+  if (to == n) { settingsOnBack = true; settingsIndex = -1; return; }
+  settingsOnBack = false; settingsCat = to; resetArmed = false; rebuildSettings(); if (settingsIndex >= 0) settingsIndex = 0; settingsTop = 0;
+}
+static void openMenu();
+static void menuStep(int d) {
+  const int n = (int)MENU_CATS.size(), pos = menuOnBack ? n : menuCat, to = (pos + d + n + 1) % (n + 1);
+  if (to == n) { menuOnBack = true; menuIndex = -1; return; }
+  menuOnBack = false; menuCat = to; const bool onTabs = menuIndex < 0; openMenu(); if (onTabs) menuIndex = -1;
+}
+// A tab row with a Back button: [L] tabs [Back] [R]. The L and R badges also step (tapped).
+static float tabRowTabsW(float rowW) { return rowW - (SHOULDER_W + SHOULDER_GAP) - BACK_GAP - BACK_W - (SHOULDER_GAP + SHOULDER_W); }
+static void drawRowShoulders(float rowX, float rowW, float cy, std::function<void(int)> step) {
+  drawShoulder(singleJoyConConnected ? "SL" : "L", rowX, cy, true);
+  drawShoulder(singleJoyConConnected ? "SR" : "R", rowX + rowW - SHOULDER_W, cy, false);
+  addHit(rowX - 6, cy - 6, SHOULDER_W + 12, tabH() + 12, [step] { step(-1); });
+  addHit(rowX + rowW - SHOULDER_W - 6, cy - 6, SHOULDER_W + 12, tabH() + 12, [step] { step(1); });
 }
 // Game rows that fit: the screen less the window's padding, the header row, the column headings,
 // the footer and the list's own padding.
@@ -1856,9 +2078,23 @@ static float legendWidth(const vector<string>& labels) {  // the widest of a leg
   float w = 0; for (auto& l : labels) w = std::max(w, gfx::textWidth(l, BTN_TEXT));
   return roundf(30 + 10 + w + 28);
 }
-static vector<float> footerWidths() {  // every footer button one width: that of the longest label any of them shows
-  const float w = legendWidth({"Play", "Favourite", "Search", "Settings", "Refresh", "Exit", "Confirm exit"});
-  return vector<float>(6, w);
+// The footer's buttons, left to right, by their action (pressFooter): Play 0, Favourite 1, Search 2, Refresh 4 (Y),
+// Settings 3 (X), Sort 7 (the next sort order, as the header's), View 9 (the four views in turn), Exit 5.
+static const int FOOT_IDS[8] = {0, 1, 2, 4, 3, 7, 9, 5};  // (Y Refresh, X Settings)
+static const int FOOT_N = 8, FOOT_EXIT = 7;  // (Exit's place)
+static vector<float> footerWidths(float room = 1e9f) {  // every footer button one width: the longest label's, or less to fit the row
+  const float natural = legendWidth({"Play", "Favourite", "Search", "Settings", "Refresh", "Sort", "View", "Exit", "Confirm exit"});
+  return vector<float>(FOOT_N, std::min(natural, floorf((room - (FOOT_N + 1) * 6) / FOOT_N)));
+}
+// The four views in turn (View, the right stick press): list or grid, each with or without the details panel.
+static void cycleView() {
+  static const struct { bool grid, panel; const char* name; } VIEWS[4] = {
+      {false, true, "List & details"}, {false, false, "List"}, {true, true, "Grid & details"}, {true, false, "Grid"}};
+  int at = 0;
+  for (int i = 0; i < 4; i++) if (VIEWS[i].grid == gridView && VIEWS[i].panel == detailsPanel) at = i;
+  const auto& v = VIEWS[(at + 1) % 4];
+  gridView = v.grid; detailsPanel = v.panel; touchScrolled = false;
+  saveSettings(); showToast(v.name);
 }
 static float bioScroll = 0, bioScrollMax = 0, artYaw = 0, artPitch = 0;  // the panel: description scroll, the box's turn (by touch)
 static double artSince = 0;  // when this game was highlighted (the box's swing starts from the centre)
@@ -2019,9 +2255,10 @@ static void drawArtPanel(float x, float y, float w, float h, const Rom* rom) {
   if (!flow) addMoveHit(x, areaTop, w, areaH, [](float, float dy) { bioScroll -= dy; });  // touch: drag the text
 }
 static void drawBrowser() {
-  const float padX = 20, padY = 18, gap = 12, divGap = 28;
-  const float tabsW = tabsWidth(LIST_VIEWS), sortW = sortWidth();
-  const vector<float> fw = footerWidths();
+  const float padX = 20, padY = 18, gap = 12, divGap = 36;  // (divGap: the divider in its middle, 18 from the R badge and from the search box)
+  // the tabs with their L and R badges: [L] 10 tabs 10 [R] (drawTabBar's spacing), so the divider after them is centred
+  const float tabsW = (28 + 10) + tabsWidth(LIST_VIEWS) + (8 + 2 + 28), sortW = sortWidth();
+  const vector<float> fw = footerWidths(gfx::UI_W - 2 * SCREEN_MARGIN - 2 * 20 - 16);  // (the footer row: the window less its padding and the scroll bar's gutter)
   float footW = 0; for (float w : fw) footW += w + 8;
   const float titleW = roundf(10 + 12 + gfx::textWidth("SW2NES", 26, gfx::BOLD) + 24);  // accent bar, title, space before the tabs
   const float headW = titleW + tabsW + divGap + SEARCH_MIN + gap + sortW;
@@ -2060,7 +2297,7 @@ static void drawBrowser() {
   textMid("SW2NES", cx + 22, cy, tabH(), 26, col(C_TEXT), gfx::BOLD);
   // Tabs | search field, sort
   drawTabBar(cx + titleW, cy, LIST_VIEWS, listView, focusArea == "tabs" ? (headIndex < 0 ? listView : headIndex < (int)LIST_VIEWS.size() ? headIndex : -1) : -1,
-             [](int i) { if (i != listView) { listView = i; roms.clear(); orderRoms(); } focusArea = "tabs"; headIndex = -1; }, false);  // (L and R cycle them)
+             [](int i) { if (i != listView) { listView = i; roms.clear(); orderRoms(); } focusArea = "tabs"; headIndex = -1; }, true);  // L and R (SL / SR) cycle them: their badges show it
   {
     gfx::rect(roundf(cx + titleW + tabsW + divGap / 2) - 1, cy + 8, 2, tabH() - 16, col(C_LINE), 1);  // divider
     // the search field takes the room from the divider to the sort control (right-aligned with the list's edge)
@@ -2073,16 +2310,14 @@ static void drawBrowser() {
     }
     const float clearW = searching ? 52 : 0;  // the x: a 30 circle, 14 in from the field's right edge (clear of its rounded corner)
     const string shown = searching ? searchQuery : "Search games";
-    textMid("+", hx + 18, cy, tabH(), BUB + 2, col(C_DIM), gfx::BOLD);
-    textMid(gfx::ellipsize(shown, searchW - 46 - clearW - 16, BUB), hx + 42, cy, tabH(), BUB, col(searching ? C_TEXT : C_DIM));
+    textMid(gfx::ellipsize(shown, searchW - 22 - clearW - 16, BUB), hx + 18, cy, tabH(), BUB, col(searching ? C_TEXT : C_DIM));
     addHit(hx, cy - 4, searchW - clearW, tabH() + 8, [] { pressFooter(6); });
     if (searching) {  // clear
       const float bx = hx + searchW - clearW;
       const bool cf = focusArea == "tabs" && headIndex == (int)LIST_VIEWS.size() + 1,
                  cl = (footFlash == 8 && nowMs() < footFlashUntil) || touchHolding(bx - 4, cy - 4, clearW + 8, tabH() + 8);
       const float d = 30, ox = hx + searchW - 14 - d, oy = roundf(cy + (tabH() - d) / 2);
-      gfx::rect(ox, oy, d, d, cl ? col(C_ACCENT) : cf ? col(C_ACCENT, 0.6f) : col(C_LINE), d / 2, cf ? 2 : 0, col(C_TEXT));
-      textMid("\u00d7", ox + (d - gfx::textWidth("\u00d7", 21)) / 2, oy, d, 21, col(C_TEXT));
+      gfx::badge("\u00d7", ox, oy, d, d, d / 2, cl ? col(C_ACCENT) : cf ? col(C_ACCENT, 0.6f) : col(C_LINE), 21, col(C_TEXT), gfx::REGULAR, cf ? 2 : 0, col(C_TEXT));
       addHit(bx - 4, cy - 4, clearW + 8, tabH() + 8, [] { pressFooter(8); });
     }
     hx += searchW + gap;
@@ -2103,15 +2338,130 @@ static void drawBrowser() {
   if (!roms.empty()) {
     const string gameHead = searchQuery.empty() ? "Game (" + std::to_string(roms.size()) + ")" : "Game (" + std::to_string(roms.size()) + " matching)";
     gfx::text(gameHead, cx + 22, cy + 1, headText(), col(C_DIM), gfx::BOLD);
-    gfx::text("Time Played", timeC - gfx::textWidth("Time Played", headText(), gfx::BOLD) / 2, cy + 1, headText(), col(C_DIM), gfx::BOLD);
-    gfx::text("Last Played", playedC - gfx::textWidth("Last Played", headText(), gfx::BOLD) / 2, cy + 1, headText(), col(C_DIM), gfx::BOLD);
-    gfx::text("Favourite", favC - gfx::textWidth("Favourite", headText(), gfx::BOLD) / 2, cy + 1, headText(), col(C_DIM), gfx::BOLD);
+    if (auto& ba = boxart::status(); ba.running) {  // a box art download: how far, beside the count
+      const int tot = ba.total.load(), dn = ba.done.load();
+      const string t = "Box art " + std::to_string(std::min(tot, dn + 1)) + " / " + std::to_string(tot);
+      const float hx = cx + 22 + gfx::textWidth(gameHead, headText(), gfx::BOLD) + 24, bx = hx + gfx::textWidth(t, headText(), gfx::BOLD) + 12, bw = 90;
+      gfx::text(t, hx, cy + 1, headText(), col(C_ACCENT), gfx::BOLD);
+      const float by = roundf(cy + 1 + headText() * 0.55f);
+      gfx::rect(bx, by, bw, 6, col(C_LINE), 3);
+      if (tot > 0) gfx::rect(bx, by, std::max(6.0f, bw * dn / tot), 6, col(C_ACCENT), 3);
+    }
+    if (!gridView) gfx::text("Time Played", timeC - gfx::textWidth("Time Played", headText(), gfx::BOLD) / 2, cy + 1, headText(), col(C_DIM), gfx::BOLD);
+    if (!gridView) gfx::text("Last Played", playedC - gfx::textWidth("Last Played", headText(), gfx::BOLD) / 2, cy + 1, headText(), col(C_DIM), gfx::BOLD);
+    if (!gridView) gfx::text("Favourite", favC - gfx::textWidth("Favourite", headText(), gfx::BOLD) / 2, cy + 1, headText(), col(C_DIM), gfx::BOLD);
   }
   cy += head;  // (kept with no games too: the window keeps its size)
   gfx::rect(cx, cy, gridW, listH, col(C_BG), 10, 1, col(C_LINE));
   if (roms.empty()) {
     float ly = cy + 16;
     for (auto& l : emptyLines) { glyphText(l, cx + 16, ly, 17, col(C_TEXT)); ly += 17 * 1.45f; }
+  } else if (gridView) {  // the grid: a cover and a title for each game
+    const float gap = 14, areaX = cx + 12, areaW = gridW - 24 - inner, areaY = cy + 12, areaH = listH - 24;
+    const float target = GRID_ASPECT >= 1 ? 190.0f : 150.0f;  // about this wide
+    const int cols = std::max(2, (int)((areaW + gap) / (target + gap)));
+    const float tileW = floorf((areaW - (cols - 1) * gap) / cols), coverH = roundf(tileW / GRID_ASPECT), capH = 28, tileH = coverH + capH + gap;
+    const int rows = std::max(1, (int)((areaH + gap) / tileH)), n = (int)roms.size(), totalRows = (n + cols - 1) / cols;
+    gridCols = cols; gridRowsShown = rows;
+    // The scroll position in pixels (UI units): a drag follows the finger, a flick glides on and slows, and the
+    // D-pad or paging slides it (eased) until the highlighted game is in view.
+    const float maxScroll = std::max(0.0f, totalRows * tileH - gap - areaH);
+    static double scrollAt = 0;
+    const double nowT = nowMs(), dt = scrollAt ? std::min(0.1, (nowT - scrollAt) / 1000.0) : 0;
+    scrollAt = nowT;
+    static int sbRow = -1, sbSet = -1;  // the scroll bar's row (it may move it)
+    if (sbSet >= 0 && sbRow != sbSet) { gridScroll = gridScrollTo = sbRow * tileH; gridFlingV = 0; touchScrolled = true; }
+    if (gridDragging && !touchIsDown) {  // the finger lifted: a quick one glides on
+      gridDragging = false;
+      if (fabsf(gridDragV) > 2) gridFlingV = gridDragV * 1.5f;
+    }
+    if (gridFlingV != 0) {
+      gridScroll += gridFlingV * (float)(dt * 120); gridFlingV *= (float)pow(0.95, dt * 120);
+      if (fabsf(gridFlingV) < 0.3f || gridScroll < 0 || gridScroll > maxScroll) gridFlingV = 0;
+      gridScrollTo = gridScroll;
+    }
+    if (!touchScrolled && !gridDragging) {  // the highlighted game in view
+      const float selTop = (selected / cols) * tileH, selBottom = selTop + tileH - gap;
+      if (selTop < gridScrollTo) gridScrollTo = selTop;
+      if (selBottom > gridScrollTo + areaH) gridScrollTo = selBottom - areaH;
+    }
+    gridScrollTo = std::max(0.0f, std::min(maxScroll, gridScrollTo));
+    // A move of the highlighted game slides the grid in a fixed 0.12 s, slowing to a clean stop (no long creep at
+    // the end); a new step during a slide carries on from where the grid is, so a held D-pad moves it steadily.
+    static float slideFrom = 0, slideTo = 0; static double slideStart = 0;
+    if (gridScrollTo != slideTo) { slideFrom = gridScroll; slideTo = gridScrollTo; slideStart = nowT; }
+    if (!gridDragging && gridFlingV == 0) {
+      const float u = (float)std::min(1.0, (nowT - slideStart) / 120.0), e = 1 - (1 - u) * (1 - u) * (1 - u);  // ease out
+      gridScroll = slideFrom + (slideTo - slideFrom) * e;
+    }
+    gridScroll = std::max(0.0f, std::min(maxScroll, gridScroll));
+    const int topRow = std::max(0, (int)(gridScroll / tileH));
+    // (to whole screen pixels: a move steps by the same amount each frame, not 1 and 2 pixels in turn)
+    const float scrollFrac = roundf((gridScroll - topRow * tileH) * UI_SCALE) / UI_SCALE;
+    top = topRow * cols;
+    addMoveHit(cx, cy, gridW, listH, [maxScroll](float, float dy) {  // drag: the grid follows the finger
+      gridDragging = true; gridFlingV = 0; touchScrolled = true;
+      gridScroll = std::max(0.0f, std::min(maxScroll, gridScroll - dy)); gridScrollTo = gridScroll;
+      gridDragV = gridDragV * 0.5f - dy * 0.5f;
+    });
+    // inside the panel's border, clear of its rounded corners: no cover is ever drawn over it or outside
+    gfx::clip((int)cx + 2, (int)cy + 8, (int)gridW - 4, (int)listH - 16);
+    for (int r = 0; r <= rows + 1; r++) for (int c = 0; c < cols; c++) {  // (and the rows cut off at the panel's edges)
+      const int idx = (topRow + r) * cols + c;
+      if (idx >= n) break;
+      const float tx = roundf(areaX + c * (tileW + gap)), ty = roundf((areaY + r * tileH - scrollFrac) * UI_SCALE) / UI_SCALE;
+      const Rom& rom = roms[idx];
+      const bool sel = idx == selected && (focusArea == "list" || focusArea == "buttons"), held = touchHolding(tx, ty, tileW, coverH + capH);
+      if ((sel && focusArea == "list") || held) gfx::rect(tx - 6, ty - 6, tileW + 12, coverH + capH + 8, col(C_SEL), 8, 2, col(C_ACCENT));
+      else if (sel) gfx::rect(tx - 6, ty - 6, tileW + 12, coverH + capH + 8, Color{0, 0, 0, 0}, 8, 1, col(C_DIM));  // the game Play / Favourite act on
+      const string title = displayName(rom.name);
+      if (gfx::Image* im = coverFor(rom.name)) {  // fitted in its slot, standing on the slot's bottom
+        const float ia = (float)gfx::imageWidth(im) / gfx::imageHeight(im);
+        float dw = tileW, dh = tileW / ia;
+        if (dh > coverH) { dh = coverH; dw = coverH * ia; }
+        gfx::imageDraw(im, roundf(tx + (tileW - dw) / 2), roundf(ty + coverH - dh), roundf(dw), roundf(dh));
+      } else if (!coverMissing(rom.name)) {  // still loading: a quiet empty slot (no flash of a title card)
+        gfx::rect(tx, ty, tileW, coverH, col(C_PANEL, 0.45f), 6);
+      } else {  // no art: the title on a card
+        gfx::rect(tx, ty, tileW, coverH, col(C_PANEL), 6, 1, col(C_LINE));
+        vector<string> ls = wrap(title, tileW - 16, 16);
+        if (ls.size() > 5) ls.resize(5);
+        float ly = ty + (coverH - ls.size() * 21.0f) / 2;
+        for (auto& l : ls) { gfx::text(l, tx + (tileW - gfx::textWidth(l, 16)) / 2, ly, 16, col(C_DIM)); ly += 21; }
+      }
+      if (contains(favourites, rom.name)) {  // a favourite: a star in the corner
+        gfx::imageDraw(starImage(), tx + tileW - 30, ty + 4, 26, 26);
+      }
+      {  // the title: a long one under the highlighted cover scrolls (after 2 s), as in the list
+        const float cw = gfx::textWidth(title, rowSmall());
+        static int capIdx = -1; static double capSince = 0;
+        const bool lit = sel && focusArea == "list";
+        if (lit && idx != capIdx) { capIdx = idx; capSince = nowMs(); }
+        if (lit && cw > tileW) {
+          const double over = cw - tileW, speed = 40, cycle = 2.0 + over / speed + 1.5;
+          const double at = fmod((nowMs() - capSince) / 1000.0, cycle);
+          const float off = at < 2.0 ? 0 : (float)std::min(over, (at - 2.0) * speed);
+          gfx::clip((int)tx, (int)(ty + coverH), (int)tileW, (int)capH + 4);
+          textMid(title, tx - off, ty + coverH + 2, capH, rowSmall(), col(C_TEXT));
+          gfx::noClip();
+          gfx::clip((int)cx + 2, (int)cy + 8, (int)gridW - 4, (int)listH - 16);  // (the grid's own clip again)
+        } else {
+          const string cap = gfx::ellipsize(title, tileW, rowSmall());
+          textMid(cap, tx + (tileW - gfx::textWidth(cap, rowSmall())) / 2, ty + coverH + 2, capH, rowSmall(), col(sel ? C_TEXT : C_DIM));
+        }
+      }
+      addHit(tx, ty, tileW, coverH + capH, [idx] { if (focusArea == "list" && selected == idx) touchPress |= B_A; else { focusArea = "list"; selected = idx; } });
+    }
+    gfx::noClip();
+    gfx::rect(cx, cy, gridW, listH, Color{0, 0, 0, 0}, 10, 1, col(C_LINE));  // the border again, over the covers
+    for (int k = 1; k <= 2 * rows * cols; k++) {  // two pages above and below, decoded ahead (paging lands on covers ready)
+      const int below = (topRow + rows) * cols + k - 1, above = topRow * cols - k;
+      if (below < n) coverFor(roms[below].name);
+      if (above >= 0) coverFor(roms[above].name);
+    }
+    coverFrame();
+    sbRow = sbSet = topRow;
+    scrollbar(cx + gridW - barW() - 6, cy + 6, listH - 12, totalRows, rows, topRow, &sbRow);
   } else {
     addHit(cx, cy, gridW, listH, nullptr, [VIS](int rows) {  // drag: the page scrolls
       top = std::max(0, std::min(std::max(0, (int)roms.size() - VIS), top + rows)); touchScrolled = true;
@@ -2131,12 +2481,9 @@ static void drawBrowser() {
       bool fav = contains(favourites, r.name);
       string played = playLabel(r.name);
       if (!played.empty()) textMid(played, timeC - gfx::textWidth(played, rowSmall()) / 2, ry, ROW_H, rowSmall(), col(C_DIM));
-      if (fav) {
-        const float ft = touchControls ? 16 : 14, th = touchControls ? 28 : 24;
-        float tw = gfx::textWidth("Favourite", ft) + 16;
-        const float ty = roundf(ry + (ROW_H - th) / 2.0f);  // centred in the row, whatever its height
-        gfx::rect(favC - tw / 2, ty, tw, th, gfx::rgb(0xf2c94c), 4);
-        textMid("Favourite", favC - tw / 2 + 8, ty, th, ft, gfx::rgb(0x1a1300));
+      if (fav) {  // a star, centred in the column and the row
+        const float sz = touchControls ? 30 : 26;
+        gfx::imageDraw(starImage(), roundf(favC - sz / 2), roundf(ry + (ROW_H - sz) / 2), sz, sz);
       }
       const string& date = lastPlayedLabel(r.name);
       if (!date.empty()) textMid(date, playedC - gfx::textWidth(date, rowSmall()) / 2, ry, ROW_H, rowSmall(), col(C_DIM));
@@ -2169,8 +2516,10 @@ static void drawBrowser() {
       {"{A}", "Play", [] { if (selected < (int)roms.size()) pressFooter(0); }, false},
       {"-", "Favourite", [] { if (selected < (int)roms.size()) pressFooter(1); }, false},
       {"+", "Search", [] { pressFooter(2); }, false},
-      {"{Y}", "Settings", [] { pressFooter(3); }, false},
-      {"{X}", "Refresh", [] { pressFooter(4); }, false},
+      {"{Y}", "Refresh", [] { pressFooter(4); }, false},
+      {"{X}", "Settings", [] { pressFooter(3); }, false},
+      {"LS", "Sort", [] { pressFooter(7); }, false},
+      {"RS", "View", [] { pressFooter(9); }, false},
       {"{B}", exitArmed ? "Confirm exit" : "Exit", [] { pressFooter(5); }, exitArmed != 0}};
   // Each legend is as wide as its longest label (a label change never moves anything); the same
   // space before, between and after them, so the row is evenly spaced and centred on the game list.
@@ -2183,20 +2532,26 @@ static void drawBrowser() {
     const bool dim = (i == 0 || i == 1) && !hasGame;
     const float bw = fw[i], lx = roundf(lx0);
     lx0 += bw + g;
-    const bool focus = focusArea == "buttons" && btnIndex == (int)i, flash = (footFlash == (int)i && nowMs() < footFlashUntil) || touchHolding(lx - g / 2, ly - 4, bw + g, btnH() + 8);
+    const bool focus = focusArea == "buttons" && btnIndex == (int)i, flash = (footFlash == FOOT_IDS[i] && nowMs() < footFlashUntil) || touchHolding(lx - g / 2, ly - 4, bw + g, btnH() + 8);
     gfx::rect(lx, ly, bw, btnH(), flash ? col(C_ACCENT) : focus || L.lit ? col(C_SEL) : col(C_BG), BTN_RADIUS, focus ? 2 : 1,
               col(flash || focus || L.lit ? C_ACCENT : C_LINE));
-    const float kw = 30, kx = lx + (bw - (kw + 10 + gfx::textWidth(L.label, BTN_TEXT))) / 2, ky = ly + (btnH() - kw) / 2;
+    const string label = gfx::ellipsize(L.label, bw - 30 - 10 - 16, BTN_TEXT);  // (fits: the buttons shrink to fit the row)
+    const float kw = 30, kx = lx + (bw - (kw + 10 + gfx::textWidth(label, BTN_TEXT))) / 2, ky = ly + (btnH() - kw) / 2;
     const string k = L.key;
     // the theme's colour for this face button (Retro Colour), if it has one
     const int fi = k == "{A}" ? 0 : k == "{B}" ? 1 : k == "{X}" ? 2 : k == "{Y}" ? 3 : -1;
     const uint32_t face = fi >= 0 ? C_FACE[fi] : 0;
     const float faceLum = face ? (0.299f * ((face >> 16) & 255) + 0.587f * ((face >> 8) & 255) + 0.114f * (face & 255)) / 255 : 0;
     const gfx::Color keyInk = face ? (faceLum > 0.6f ? gfx::rgb(0x1e1b2a) : gfx::rgb(0xffffff)) : col(C_PANEL);  // dark letters on a light icon, white on a dark one
-    gfx::rect(kx, ky, kw, kw, face ? (dim ? gfx::rgb(face, 0.45f) : gfx::rgb(face)) : col(dim ? C_LINE : C_DIM), kw / 2);
-    if (k[0] == '{' && singleJoyConConnected) drawFaceGlyph(glyphToken(k, 0), kx + (kw - glyphWidth(20)) / 2, ky + (kw - 20 * 1.25f) / 2, 20, keyInk);
-    else { const string t = k[0] == '{' ? string(1, k[1]) : k; textMid(t, kx + (kw - gfx::textWidth(t, 18, gfx::BOLD)) / 2, ky, kw, 18, keyInk, gfx::BOLD); }
-    textMid(L.label, kx + kw + 10, ly, btnH(), BTN_TEXT, flash ? col(C_PANEL) : col(dim ? C_DIM : L.lit ? C_ACCENT : C_TEXT));
+    const Color keyFill = face ? (dim ? gfx::rgb(face, 0.45f) : gfx::rgb(face)) : col(dim ? C_LINE : C_DIM);
+    if (k[0] == '{' && singleJoyConConnected) {
+      gfx::rect(kx, ky, kw, kw, keyFill, kw / 2);
+      drawFaceGlyph(glyphToken(k, 0), kx + (kw - glyphWidth(20)) / 2, ky + (kw - 20 * 1.25f) / 2, 20, keyInk);
+    } else {  // the circle and its letter as one: the letter exactly in the middle
+      const string t = k[0] == '{' ? string(1, k[1]) : k;
+      gfx::badge(t, kx, ky, kw, kw, kw / 2, keyFill, t.size() > 1 ? 13 : 18, keyInk, gfx::BOLD);
+    }
+    textMid(label, kx + kw + 10, ly, btnH(), BTN_TEXT, flash ? col(C_PANEL) : col(dim ? C_DIM : L.lit ? C_ACCENT : C_TEXT));
     addHit(lx - g / 2, ly - 4, bw + g, btnH() + 8, L.tap);
   }
 }
@@ -2287,7 +2642,7 @@ static void drawRemap() {
 }
 static void drawSettings() {
   // As wide as its tabs need (with their L / R caps), at least 640.
-  const float padX = 20, padY = 18, winW = std::max(640.0f, equalTabsWidth(SETTINGS_CATS) + BACK_GAP + BACK_W + 2 * padX + 16), innerW = winW - 2 * padX;
+  const float padX = 20, padY = 18, winW = std::max(640.0f, equalTabsWidth(SETTINGS_CATS) + BACK_GAP + BACK_W + 2 * (SHOULDER_W + SHOULDER_GAP) + 2 * padX + 16), innerW = winW - 2 * padX;
   int n = (int)SETTINGS_ITEMS.size(), total = n + 1;
   // One size for every category (the largest, advanced shown); more rows than fit the screen scroll.
   int vis = std::max(5, std::min(std::max(total, settingsFixedRows()), (int)((gfx::UI_H * 0.94 - 36 - 50 - 14 - tabRowH() - 10) / SET_ROW_H)));
@@ -2307,10 +2662,11 @@ static void drawSettings() {
   panelHeader(cx, cy, "Settings", "for all games");
 
   cy += 34 + 12;
-  drawTabBar(cx, cy, SETTINGS_CATS, settingsCat, settingsIndex < 0 && !settingsOnBack ? settingsCat : -1,
+  drawTabBar(cx + SHOULDER_W + SHOULDER_GAP, cy, SETTINGS_CATS, settingsCat, settingsIndex < 0 && !settingsOnBack ? settingsCat : -1,
              [](int i) { if (i != settingsCat) { settingsCat = i; resetArmed = false; rebuildSettings(); settingsTop = 0; } settingsIndex = -1; settingsOnBack = false; }, false,
-             listW - BACK_GAP - BACK_W);
-  drawTabBack(cx, listW, cy, settingsIndex < 0 && settingsOnBack, [] { touchPress |= B_B; });
+             tabRowTabsW(listW));
+  drawTabBack(cx, listW - SHOULDER_GAP - SHOULDER_W, cy, settingsIndex < 0 && settingsOnBack, [] { touchPress |= B_B; });
+  drawRowShoulders(cx, listW, cy, [](int d) { settingsStep(d); });
   cy += tabRowH() + 10;
   gfx::rect(cx, cy, listW, listH, col(C_BG), 10, 1, col(C_LINE));
   addHit(cx, cy, listW, listH, nullptr, [total, vis](int rows) { settingsTop = std::max(0, std::min(std::max(0, total - vis), settingsTop + rows)); touchScrolled = true; });
@@ -2379,7 +2735,7 @@ static void drawMenu() {
   // The game list's and Settings' layout: accent-bar title, tabs, rows of ROW_H in a list box.
   // The tabbed menu is as wide as Settings and keeps one size (its largest category); other menus
   // (cheats) fit their rows.
-  const float padX = 20, padY = 18, panelW = menuHasTabs ? std::max(640.0f, equalTabsWidth(MENU_CATS) + BACK_GAP + BACK_W + 2 * padX + 16) : 460, innerW = panelW - 2 * padX;
+  const float padX = 20, padY = 18, panelW = menuHasTabs ? std::max(640.0f, equalTabsWidth(MENU_CATS) + BACK_GAP + BACK_W + 2 * (SHOULDER_W + SHOULDER_GAP) + 2 * padX + 16) : 460, innerW = panelW - 2 * padX;
   const float tabsH = menuHasTabs ? tabRowH() + 10 : 0;
   int n = (int)menuItems.size();
   const int fit = (int)((gfx::UI_H * 0.94f - padY * 2 - 34 - 12 - tabsH - 12) / ROW_H);
@@ -2401,9 +2757,10 @@ static void drawMenu() {
   addHit(0, 0, gfx::UI_W, gfx::UI_H, [] { touchPress |= B_B; });  // outside the panel: close / back
   addHit(x, y, panelW, h, [] {});
   if (menuHasTabs) {
-    drawTabBar(cx, cy, MENU_CATS, menuCat, menuIndex < 0 && !menuOnBack ? menuCat : -1, [](int i) { if (i != menuCat) { menuCat = i; openMenu(); } menuIndex = -1; menuOnBack = false; }, false,
-               listW - BACK_GAP - BACK_W);
-    drawTabBack(cx, listW, cy, menuIndex < 0 && menuOnBack, [] { touchPress |= B_B; });
+    drawTabBar(cx + SHOULDER_W + SHOULDER_GAP, cy, MENU_CATS, menuCat, menuIndex < 0 && !menuOnBack ? menuCat : -1, [](int i) { if (i != menuCat) { menuCat = i; openMenu(); } menuIndex = -1; menuOnBack = false; }, false,
+               tabRowTabsW(listW));
+    drawTabBack(cx, listW - SHOULDER_GAP - SHOULDER_W, cy, menuIndex < 0 && menuOnBack, [] { touchPress |= B_B; });
+    drawRowShoulders(cx, listW, cy, [](int d) { menuStep(d); });
     cy += tabsH;
   }
   addHit(cx, cy, listW, listH, nullptr, [n, vis](int rows) { menuTop = std::max(0, std::min(std::max(0, n - vis), menuTop + rows)); touchScrolled = true; });
@@ -2457,13 +2814,28 @@ static void drawCodeEditor() {
 static void drawMessage() {
   gfx::rect(0, 0, gfx::UI_W, gfx::UI_H, gfx::Color{0, 0, 0, 0.75f});
   vector<string> lines = wrap(messageText, 700, 22);
-  float lh = 22 * 1.45f, w = 760, h = 30 * 2 + lines.size() * lh + 18 + 18 * LH;
+  const float lh = 22 * 1.45f, w = 760, foot = messageAsk ? 64 : 18 * LH;
+  const float h = 30 * 2 + lines.size() * lh + 18 + foot;
   float x = (gfx::UI_W - w) / 2, y = roundf((gfx::UI_H - h) / 2);
   gfx::rect(x, y, w, h, col(C_PANEL), 14, 1, col(C_LINE));
   float cy = y + 30;
   for (auto& l : lines) { textMid(l, x + 30, cy, lh, 22, col(C_TEXT)); cy += lh; }
-  glyphText("Press {A} or {B} to continue", x + 30, cy + 18 - 2, 18, col(C_DIM));
-  addHit(0, 0, gfx::UI_W, gfx::UI_H, [] { touchPress |= B_A; });
+  if (!messageAsk) {
+    glyphText("Press {A} or {B} to continue", x + 30, cy + 18 - 2, 18, col(C_DIM));
+    addHit(0, 0, gfx::UI_W, gfx::UI_H, [] { touchPress |= B_A; });
+    return;
+  }
+  // a question: two buttons, A the first, B the second
+  const float bh = 48, bw = 220, by = cy + 18;
+  const struct { const string* label; const char* key; float bx; u64 button; } bs[2] = {{&messageYesLabel, "{A}", x + w - 30 - 2 * bw - 16, B_A}, {&messageNoLabel, "{B}", x + w - 30 - bw, B_B}};
+  for (auto& b : bs) {
+    const bool held = touchHolding(b.bx, by, bw, bh);
+    gfx::rect(b.bx, by, bw, bh, held ? col(C_ACCENT) : col(b.button == B_A ? C_SEL : C_BG), BTN_RADIUS, 1, col(b.button == B_A ? C_ACCENT : C_LINE));
+    const string t = string(b.key) + " " + *b.label;
+    glyphText(t, b.bx + (bw - glyphTextWidth(t, 20)) / 2, by + (bh - 20 * 1.25f) / 2, 20, col(C_TEXT));
+    const u64 btn = b.button;
+    addHit(b.bx, by, bw, bh, [btn] { touchPress |= btn; });
+  }
 }
 
 static void drawToast() {
@@ -2636,8 +3008,12 @@ static void updateStats(double t) {
 // Touches: a tap (lifted within ~20 px of where it went down) calls the topmost hit under it; a
 // drag that starts on a hit with a drag action moves it by rows. Touch is in 1280 x 720 panel
 // points, the interface in UI_W x UI_H.
+static std::function<void(int)> flingDrag;  // a swipe's scroll going on after the finger lifted
+static float flingV = 0, flingAcc = 0;
+static void stopFling() { flingDrag = nullptr; flingV = 0; flingAcc = 0; gridFlingV = 0; }
 static void touchUpdate() {
   static bool down = false, dragging = false;
+  static float dragV = 0;  // the finger's speed (UI units a frame, smoothed)
   static float sx = 0, sy = 0, lx = 0, ly = 0, acc = 0;
   static int dragHit = -1;
   HidTouchScreenState st{};
@@ -2649,13 +3025,14 @@ static void touchUpdate() {
   if (now && !down) { touchStartX = x; touchStartY = y; }
   touchDragging = dragging || (now && down && (fabsf(x - sx) >= 20 || fabsf(y - sy) >= 20));
   if (now && !down && debugLog) record("touch: down at panel %u, %u (UI %.0f, %.0f)", st.touches[0].x, st.touches[0].y, x, y);
-  if (now && !down) { down = true; dragging = false; sx = lx = x; sy = ly = y; acc = 0; dragHit = hitAt(x, y, true); }
+  if (now && !down) { down = true; dragging = false; sx = lx = x; sy = ly = y; acc = 0; dragV = 0; stopFling(); dragHit = hitAt(x, y, true); }
   else if (now) {
     if (!dragging && dragHit >= 0 && dragHit < (int)hits.size() && hits[dragHit].move && (fabsf(x - sx) > 8 || fabsf(y - sy) > 8)) dragging = true;
     else if (!dragging && dragHit >= 0 && fabsf(y - sy) > 20) dragging = true;
     if (dragging && dragHit >= 0 && dragHit < (int)hits.size() && hits[dragHit].move) hits[dragHit].move(x - lx, y - ly);
     else if (dragging && dragHit >= 0 && dragHit < (int)hits.size()) {
       acc += y - ly;
+      dragV = dragV * 0.5f + (y - ly) * 0.5f;
       const int rows = (int)(acc / ROW_H);
       if (rows) { acc -= rows * ROW_H; hits[dragHit].drag(-rows); }
     }
@@ -2663,11 +3040,20 @@ static void touchUpdate() {
   } else if (down) {
     down = false;
     if (!dragging && fabsf(lx - sx) < 20 && fabsf(ly - sy) < 20) { const int i = hitAt(lx, ly, false); if (i >= 0) { tapThisFrame = true; auto f = hits[i].tap; f(); } }
+    // a quick swipe of a list or the grid: it goes on, slowing (as on a phone)
+    if (dragging && dragHit >= 0 && dragHit < (int)hits.size() && hits[dragHit].drag && fabsf(dragV) > 3) { flingDrag = hits[dragHit].drag; flingV = dragV * 1.5f; flingAcc = 0; }
+  } else if (flingDrag) {
+    flingAcc += flingV;
+    const int rows = (int)(flingAcc / ROW_H);
+    if (rows) { flingAcc -= rows * ROW_H; flingDrag(-rows); }
+    flingV *= 0.965f;
+    if (fabsf(flingV) < 0.6f) stopFling();
   }
 }
 static void handleUi(u64 bits) {
   Nav ev = navEvents(bits);
   if (ev.up || ev.down || (ev.pressed & (B_A | B_B | B_LEFT | B_RIGHT | B_L | B_R))) touchScrolled = false;
+  if (ev.up || ev.down || ev.pressed) stopFling();  // a button stops a swipe's scroll
   ev.pressed |= touchPress; ev.up |= touchUp; ev.down |= touchDown;
   touchPress = 0; touchUp = touchDown = false;
   struct ClearTap { ~ClearTap() { tapThisFrame = false; } } clearTap;  // (whichever way handleUi returns)
@@ -2687,8 +3073,9 @@ static void handleUi(u64 bits) {
         case 3: mode = "settings"; settingsIndex = 0; settingsTop = 0; break;
         case 4: scan(); showToast("List refreshed"); break;
         case 6: openSearch(); if (focusArea == "list" && roms.empty()) focusArea = "tabs"; break;
-        case 7: { int& rs = romSortByView[listView]; rs = (rs + 1) % ROM_SORT_LABELS.size(); orderRoms(); saveSettings(); break; }
+        case 7: { int& rs = romSortByView[listView]; rs = (rs + 1) % ROM_SORT_LABELS.size(); orderRoms(); saveSettings(); showToast("Sort: " + ROM_SORT_LABELS[rs]); break; }
         case 8: searchQuery.clear(); orderRoms(); showToast("Search cleared"); headIndex = (int)LIST_VIEWS.size(); break;
+        case 9: cycleView(); break;
         case 5:
           if (exitArmed) quitApp = true;
           else { exitArmed = t + 3000; showToast("Press Exit again to exit", 3000); }
@@ -2696,9 +3083,31 @@ static void handleUi(u64 bits) {
       }
       return;
     }
-    if (pressed & (HidNpadButton_StickL | (singleJoyConConnected ? (u64)HidNpadButton_StickR : 0))) { exitArmed = 0; pressFooter(7); return; }
+    // the left stick press: the next sort order; the right stick press: the next of the four views
+    // (a single Joy-Con's stick press is its own side's: a left Joy-Con sorts, a right one changes the view)
+    if (pressed & HidNpadButton_StickL) { exitArmed = 0; pressFooter(7); return; }
+    if (pressed & HidNpadButton_StickR) { exitArmed = 0; pressFooter(9); return; }
     // L/ZL and R/ZR cycle the All/Favourites/Recent tabs from anywhere.
-    int tabStep = ((pressed & (B_R | HidNpadButton_ZR)) ? 1 : 0) - ((pressed & (B_L | HidNpadButton_ZL)) ? 1 : 0);
+    // L / R the tabs (ZL / ZR page); on a single Joy-Con, SL cycles the tabs and SR pages down
+    int tabStep = singleJoyConConnected ? ((pressed & B_L) ? 1 : 0) : ((pressed & B_R) ? 1 : 0) - ((pressed & B_L) ? 1 : 0);
+    {  // ZL / ZR: a page up / down of the list or the grid
+      // held for 0.7 s, it keeps paging (every 0.15 s) until let go
+      static double pageHeldSince = 0, pageRepeatAt = 0;
+      const u64 pgDown = HidNpadButton_ZR | (singleJoyConConnected ? (u64)B_R : 0);  // (a single Joy-Con: SR)
+      const int heldDir = ((bits & pgDown) ? 1 : 0) - ((bits & HidNpadButton_ZL) ? 1 : 0);
+      int pageStep = ((pressed & pgDown) ? 1 : 0) - ((pressed & HidNpadButton_ZL) ? 1 : 0);
+      if (pageStep) { pageHeldSince = t; pageRepeatAt = t + 700; }
+      else if (heldDir && pageHeldSince && t >= pageRepeatAt) { pageStep = heldDir; pageRepeatAt = t + 150; }
+      if (!heldDir) pageHeldSince = 0;
+      if (pageStep && !roms.empty()) {
+        const int page = gridView ? std::max(1, gridCols * gridRowsShown) : std::max(1, std::min((int)roms.size(), maxRows()));
+        const int last = (int)roms.size() - 1, fresh = (pressed & (HidNpadButton_ZL | pgDown)) != 0;
+        if (fresh && pageStep < 0 && selected == 0) selected = last;           // round: the first page, then the last
+        else if (fresh && pageStep > 0 && selected == last) selected = 0;     // and the last, then the first
+        else selected = std::max(0, std::min(last, selected + pageStep * page));
+        focusArea = "list"; touchScrolled = false;
+      }
+    }
     if (tabStep) {
       int n = (int)LIST_VIEWS.size();
       listView = (listView + tabStep + n) % n; roms.clear(); orderRoms(); selected = 0;
@@ -2706,7 +3115,7 @@ static void handleUi(u64 bits) {
       if (focusArea == "list" && roms.empty()) focusArea = "tabs";
     }
     {  // anything but Exit again (B, or A on the Exit button) disarms it
-      const u64 again = B_B | (focusArea == "buttons" && btnIndex == 5 ? (u64)B_A : 0);
+      const u64 again = B_B | (focusArea == "buttons" && btnIndex == FOOT_EXIT ? (u64)B_A : 0);
       if (exitArmed && (t > exitArmed || (pressed & ~again) || ev.up || ev.down)) exitArmed = 0;
     }
     // The footer buttons' own shortcuts: - Favourite, + Search, Y Settings, X Refresh, B Exit
@@ -2714,8 +3123,8 @@ static void handleUi(u64 bits) {
     const bool game = selected < (int)roms.size();
     if (pressed & B_MINUS) { if (game) pressFooter(1); return; }
     if (pressed & B_PLUS) { pressFooter(2); return; }
-    if (pressed & B_Y) { pressFooter(3); return; }
-    if (pressed & B_X) { pressFooter(4); return; }
+    if (pressed & B_Y) { pressFooter(4); return; }  // Refresh
+    if (pressed & B_X) { pressFooter(3); return; }  // Settings
     if (pressed & B_B) { pressFooter(5); return; }
     if (focusArea == "list" && roms.empty()) focusArea = "tabs";
     if (focusArea != "list" && focusArea != "buttons") focusArea = "tabs";
@@ -2733,19 +3142,40 @@ static void handleUi(u64 bits) {
       else if ((pressed & B_A) && headIndex == CLEAR) pressFooter(8);
       else if ((pressed & B_A) && headIndex == SORT) pressFooter(7);
       else if (ev.down) { if (roms.empty()) focusArea = "buttons"; else { focusArea = "list"; selected = 0; } }
-      else if (ev.up) focusArea = "buttons";
+      else if (ev.up) { if (roms.empty()) focusArea = "buttons"; else { focusArea = "list"; selected = (int)roms.size() - 1; } }  // round: the last game
+    } else if (focusArea == "list" && gridView) {  // the grid: left / right a game, up / down a row
+      const int n = (int)roms.size(), c = std::max(1, gridCols);
+      if (pressed & B_LEFT) selected = std::max(0, selected - 1);
+      if (pressed & B_RIGHT) selected = std::min(n - 1, selected + 1);
+      // round: up from the top row to the bottom one, down from the bottom row to the top one (a fresh press;
+      // held, it stops at the end)
+      const bool freshV = (pressed & (B_UP | B_DOWN | B_SU | B_SD)) != 0;
+      if (ev.up) {
+        if (selected >= c) selected -= c;
+        else if (freshV) focusArea = "tabs";  // the header row first; up again goes round to the bottom row
+      }
+      if (ev.down) {
+        if (selected + c < n) selected += c;
+        else if (selected / c < (n - 1) / c) selected = n - 1;  // the last row is short: its last game
+        else if (freshV) focusArea = "buttons";  // the footer first; down again goes round to the top row
+      }
+      if (ev.up || ev.down || (pressed & (B_LEFT | B_RIGHT))) touchScrolled = false;
+      if ((pressed & B_A) && game) pressFooter(0);
     } else if (focusArea == "list") {
-      if (ev.up) { if (selected == 0) focusArea = "tabs"; else selected--; }
-      if (ev.down) { if (selected == (int)roms.size() - 1) focusArea = "buttons"; else selected++; }
+      // round: up from the first game to the last, down from the last to the first (a fresh press; held, it stops)
+      const bool freshV = (pressed & (B_UP | B_DOWN | B_SU | B_SD)) != 0;
+      // (the header row first at the top, the footer first at the bottom; one more press goes round)
+      if (ev.up) { if (selected > 0) selected--; else if (freshV) focusArea = "tabs"; }
+      if (ev.down) { if (selected < (int)roms.size() - 1) selected++; else if (freshV) focusArea = "buttons"; }
       if (pressed & B_LEFT) selected = std::max(0, selected - VIS);
       if (pressed & B_RIGHT) selected = std::min((int)roms.size() - 1, selected + VIS);
       if ((pressed & B_A) && game) pressFooter(0);
     } else {  // the footer buttons: left / right move along them, A presses one
-      if (pressed & B_LEFT) btnIndex = (btnIndex + 5) % 6;
-      if (pressed & B_RIGHT) btnIndex = (btnIndex + 1) % 6;
+      if (pressed & B_LEFT) btnIndex = (btnIndex + FOOT_N - 1) % FOOT_N;
+      if (pressed & B_RIGHT) btnIndex = (btnIndex + 1) % FOOT_N;
       if (ev.up) { if (roms.empty()) focusArea = "tabs"; else { focusArea = "list"; selected = std::min(selected, (int)roms.size() - 1); } }
-      if (ev.down) focusArea = "tabs";  // wraps round to the top
-      if ((pressed & B_A) && (game || btnIndex > 1)) pressFooter(btnIndex);
+      if (ev.down) { if (roms.empty()) focusArea = "tabs"; else { focusArea = "list"; selected = 0; } }  // round: the first game
+      if ((pressed & B_A) && (game || btnIndex > 1)) pressFooter(FOOT_IDS[btnIndex]);
     }
   } else if (mode == "folders") {
     int total = pickRows(), up = pickAtRoot() ? 0 : 1;
@@ -2792,7 +3222,7 @@ static void handleUi(u64 bits) {
   } else if (mode == "settings") {
     {  // L / R (or ZL / ZR): the next / previous category
       int step = ((pressed & (B_R | HidNpadButton_ZR)) ? 1 : 0) - ((pressed & (B_L | HidNpadButton_ZL)) ? 1 : 0);
-      if (step) { int n = (int)SETTINGS_CATS.size(); settingsCat = (settingsCat + step + n) % n; resetArmed = false; rebuildSettings(); if (settingsIndex >= 0) settingsIndex = 0; settingsTop = 0; return; }
+      if (step) { settingsStep(step); return; }  // (the tabs, then Back)
     }
     int nItems = (int)SETTINGS_ITEMS.size();
     if (ev.up || ev.down || (pressed & B_B)) { resetArmed = false; resetMapArmed = false; }
@@ -2833,7 +3263,7 @@ static void handleUi(u64 bits) {
       if (tapStep && ((bits & (MENU_COMBO & ~(u64)(B_L | B_R))) || ((bits & B_L) && (bits & B_R)))) tapSpoilt = true;
       if (tapStep && !(bits & (B_L | B_R))) {
         const int step = tapSpoilt ? 0 : tapStep; tapStep = 0;
-        if (step && menuHasTabs) { int c = (int)MENU_CATS.size(); menuCat = (menuCat + step + c) % c; const bool onTabs = menuIndex < 0; openMenu(); if (onTabs) menuIndex = -1; return; }
+        if (step && menuHasTabs) { menuStep(step); return; }  // (the tabs, then Back)
       }
     }
     int n = (int)menuItems.size();
@@ -2871,8 +3301,25 @@ static void handleUi(u64 bits) {
   } else if (mode == "ggedit") {
     handleCodeEditor(ev);
   } else if (mode == "message") {
-    if (pressed & (B_A | B_B)) { mode = "browser"; auto then = messageThen; messageThen = nullptr; if (then) then(); }
+    if (pressed & (B_A | B_B)) {
+      mode = "browser";
+      auto then = (messageAsk && (pressed & B_B) && !(pressed & B_A)) ? messageNo : messageThen;  // a question: B is its second answer
+      messageThen = nullptr; messageNo = nullptr; messageAsk = false;
+      if (then) then();
+    }
   }
+}
+
+// The first time there are games without box art (and the console is online): offer to download it. Asked once.
+static void maybeAskArt() {
+  if (artAsked || allRoms.empty() || boxart::status().running) return;
+  const boxart::System sys = artSystem();
+  bool missing = false;
+  for (const Rom& r : allRoms) if (!exists(boxart::infoPath(sys, r.name))) { missing = true; break; }
+  if (!missing || !internetConnected()) return;
+  artAsked = true; saveSettings();
+  showQuestion("Some of your games have no box art or description yet.\n\nDownload them now from ScreenScraper? It needs an internet connection and takes a few seconds a game. You can also do it later in Settings > App.",
+               "Download", "Not now", [] { startBoxArt(false); }, nullptr);
 }
 
 int main(int argc, char** argv) {
@@ -2966,8 +3413,9 @@ int main(int argc, char** argv) {
     {  // box art: reload as it arrives; say how it went when the run ends
       static bool artWasRunning = false; static int artSeen = 0;
       auto& b = boxart::status();
-      if (b.running && b.found != artSeen) { artSeen = b.found; artCache.clear(); }
-      if (artWasRunning && !b.running) { artCache.clear(); titleCache.clear(); orderRoms(); artSeen = 0; showToast(b.message, 4000); }
+      if (b.running && b.found != artSeen) { artSeen = b.found; clearArtCache(); staleCovers(false); }
+      if (mode == "browser" && artCheckPending) { artCheckPending = false; maybeAskArt(); }
+      if (artWasRunning && !b.running) { clearArtCache(); staleCovers(true); titleCache.clear(); orderRoms(); artSeen = 0; showToast(b.message, 4000); }
       artWasRunning = b.running;
     }
     if (toastUntil && t > toastUntil) toastUntil = 0;
@@ -3022,6 +3470,7 @@ int main(int argc, char** argv) {
   }
 
   if (running) quitGame();
+  coverLoaderStop();  // the cover decoding thread ends too
   boxart::stop();  // a download in progress: cancelled, its thread ended before the program is (its game is redone next time)
   saveSettings();
   gfx::imageDestroy(graphImage);

@@ -256,7 +256,23 @@ static const Json* pickMedia(const Json* medias, const char* type, const std::ve
   for (const Json& m : medias->a) if (str(&m, "type") == type) { any = &m; break; }
   return any;
 }
-static bool fetchMedia(const Json* m, const std::string& path) {
+extern "C" unsigned char* stbi_load_from_memory(const unsigned char* buffer, int len, int* x, int* y, int* comp, int req_comp);
+extern "C" void stbi_image_free(void* retval_from_stbi_load);
+// One flat colour (a placeholder ScreenScraper has for some games, e.g. a plain green box back): not kept.
+static bool plainImage(const std::vector<uint8_t>& file) {
+  int w = 0, h = 0, n = 0;
+  unsigned char* px = stbi_load_from_memory(file.data(), (int)file.size(), &w, &h, &n, 3);
+  if (!px) return false;
+  const size_t count = (size_t)w * h;
+  double sum[3] = {0, 0, 0}, sq[3] = {0, 0, 0}; int k = 0;
+  for (size_t i = 0; i < count; i += count / 997 + 1, k++)
+    for (int c = 0; c < 3; c++) { const double v = px[i * 3 + c]; sum[c] += v; sq[c] += v * v; }
+  stbi_image_free(px);
+  double var = 0;
+  for (int c = 0; c < 3; c++) var += sq[c] / k - (sum[c] / k) * (sum[c] / k);
+  return var < 3 * 6 * 6;
+}
+static bool fetchMedia(const Json* m, const std::string& path, bool notPlain = false) {
   if (!m) return false;
   std::string url = str(m, "url");
   if (url.empty()) return false;
@@ -264,7 +280,9 @@ static bool fetchMedia(const Json* m, const std::string& path) {
   std::vector<uint8_t> d;
   const long code = get(url, d);
   const bool image = d.size() > 3 && ((d[0] == 0xFF && d[1] == 0xD8) || (d[1] == 'P' && d[2] == 'N' && d[3] == 'G'));
-  return code == 200 && image && writeFile(path, d);
+  if (code != 200 || !image) return false;
+  if (notPlain && plainImage(d)) { logf("boxart: %s: a plain placeholder image, not kept", path.substr(path.rfind('/') + 1).c_str()); return false; }
+  return writeFile(path, d);
 }
 
 // Deletes the art folder of earlier builds (LaunchBox / libretro images and details, their databases)
@@ -398,8 +416,8 @@ static void run(System sys, std::vector<Game> games, bool again, std::function<b
       const std::string fr = front ? str(front, "region") : "";
       bool ok = fetchMedia(front, artPath(sys, g.name));
       // the back and the side from the front's region when there are (the same box)
-      const bool back = ok && fetchMedia(pickMedia(medias, "box-2D-back", order, fr), backPath(sys, g.name));
-      const bool side = ok && fetchMedia(pickMedia(medias, "box-2D-side", order, fr), spinePath(sys, g.name));
+      const bool back = ok && fetchMedia(pickMedia(medias, "box-2D-back", order, fr), backPath(sys, g.name), true);
+      const bool side = ok && fetchMedia(pickMedia(medias, "box-2D-side", order, fr), spinePath(sys, g.name), true);
       if (!back) remove(backPath(sys, g.name).c_str());
       if (!side) remove(spinePath(sys, g.name).c_str());
       logf("boxart: %s -> %s%s%s%s", g.name.c_str(), !jeu ? "not in ScreenScraper" : ok ? "front" : "no box art", back ? ", back" : "", side ? ", side" : "",
