@@ -104,10 +104,15 @@ static bool readFile(const char* path, std::vector<uint8_t>& out) {
   return ok;
 }
 
+bool italic = false;
 static const Glyph& glyph(int font, int px, uint32_t cp) {
-  uint64_t key = ((uint64_t)font << 40) | ((uint64_t)px << 24) | cp;
+  uint64_t key = ((uint64_t)font << 40) | ((uint64_t)px << 24) | cp | (italic ? (1ull << 56) : 0);  // (slanted glyphs kept apart)
   auto it = glyphs.find(key);
   if (it != glyphs.end()) return it->second;
+  {  // the slant (an italic made from the upright font): a shear, or none
+    static FT_Matrix shear = {0x10000, (FT_Fixed)(0.2126 * 0x10000), 0, 0x10000};  // tan 12 degrees
+    FT_Set_Transform(faces[font], italic ? &shear : nullptr, nullptr);
+  }
   Glyph g = {0, 0, 0, 0, 0, 0, 0, 0, 0};
   FT_Face face = faces[font];
   FT_Set_Pixel_Sizes(face, 0, px);
@@ -236,11 +241,13 @@ static void textAtPx(const std::string& s, float pen, float baseline, int px, Co
   drawTextVerts(c);
 }
 void textCentered(const std::string& s, float mx, float my, float size, Color c, Font f) {
+  struct Upright { bool was = italic; Upright() { italic = false; } ~Upright() { italic = was; } } upright;  // (a button icon's letters)
   const int px = (int)(size * UI_SCALE + 0.5f);
   float x0, y0, x1, y1; inkPx(s, px, f, x0, y0, x1, y1);
   textAtPx(s, roundf(mx * UI_SCALE - (x0 + x1) / 2), roundf(my * UI_SCALE - (y0 + y1) / 2), px, c, f);
 }
 void badge(const std::string& label, float x, float y, float w, float h, float radius, Color fill, float size, Color ink, Font f, float border, Color borderColor) {
+  struct Upright { bool was = italic; Upright() { italic = false; } ~Upright() { italic = was; } } upright;  // (a button icon's letters)
   const int px = (int)(size * UI_SCALE + 0.5f);
   float x0, y0, x1, y1; inkPx(label, px, f, x0, y0, x1, y1);
   const int iw = (int)(x1 - x0), ih = (int)(y1 - y0);

@@ -53,7 +53,7 @@ enum { N_A = 1, N_B = 2, N_SELECT = 4, N_START = 8, N_UP = 16, N_DOWN = 32, N_LE
 
 // Colours: set by the theme (Settings -> App -> Theme).
 static uint32_t C_BG = 0x0b0d12, C_PANEL = 0x151924, C_LINE = 0x2a3142, C_TEXT = 0xeef1f7, C_DIM = 0x9aa3b5, C_ACCENT = 0xe4463b, C_SEL = 0x2b3550;
-struct Theme { const char* name; uint32_t bg, panel, line, text, dim, accent, sel; uint32_t faceA = 0, faceB = 0, faceX = 0, faceY = 0; float border = 1; };  // border: how thick its borders are  // face: button-icon colours (0: the usual)
+struct Theme { const char* name; uint32_t bg, panel, line, text, dim, accent, sel; uint32_t faceA = 0, faceB = 0, faceX = 0, faceY = 0; float border = 1; bool italic = false; };  // border: how thick its borders are; italic: slanted text  // face: button-icon colours (0: the usual)
 static const Theme THEMES[] = {
     {"Dark", 0x0b0d12, 0x151924, 0x2a3142, 0xeef1f7, 0x9aa3b5, 0xe4463b, 0x2b3550},
     {"Light", 0xe6e9ef, 0xf7f8fa, 0xc5ccd8, 0x1b1f27, 0x566072, 0xd2382c, 0xd9e0ec},
@@ -64,16 +64,16 @@ static const Theme THEMES[] = {
     {"Green", 0x08130d, 0x0f1f15, 0x21402c, 0xeaf8ef, 0x9fcab0, 0x3ccf6e, 0x173a24},
     {"Orange", 0x140e08, 0x21170d, 0x47331d, 0xfcf3ea, 0xd3b79c, 0xff8c2a, 0x3d2a16},
     // Retro: the grey of the 16-bit console's case (black borders), charcoal text, its purple buttons as the accent
-    {"Retro", 0x1f1e23, 0x34333a, 0x000000, 0xffffff, 0xdcdbe2, 0xb4a6ff, 0x4a4073, 0x6650c8, 0x6650c8, 0xb3a5ef, 0xb3a5ef, 1.6f},
+    {"Retro", 0x1f1e23, 0x34333a, 0x000000, 0xffffff, 0xdcdbe2, 0xb4a6ff, 0x4a4073, 0x6650c8, 0x6650c8, 0xb3a5ef, 0xb3a5ef, 1.6f, true},
     // Retro Colour: the same greys, with the four coloured face buttons of the PAL and Japanese pads
-    {"Retro Colour", 0x1f1e23, 0x34333a, 0x000000, 0xffffff, 0xdcdbe2, 0xe0463e, 0x4a3a3c, 0xe0463e, 0xf2c230, 0x3f6fe0, 0x3caa55, 1.6f}};
+    {"Retro Colour", 0x1f1e23, 0x34333a, 0x000000, 0xffffff, 0xdcdbe2, 0xe0463e, 0x4a3a3c, 0xe0463e, 0xf2c230, 0x3f6fe0, 0x3caa55, 1.6f, true}};
 static const int THEME_COUNT = (int)(sizeof THEMES / sizeof THEMES[0]);
 static int themeIndex = 0;
 static uint32_t C_FACE[4] = {0, 0, 0, 0};  // A, B, X, Y icon colours of the theme (0: the usual)
 static void applyTheme(int i) {
   themeIndex = i >= 0 && i < THEME_COUNT ? i : 0;
   const Theme& t = THEMES[themeIndex];
-  gfx::borderScale = t.border;
+  gfx::borderScale = t.border; gfx::italic = t.italic;
   C_FACE[0] = t.faceA; C_FACE[1] = t.faceB; C_FACE[2] = t.faceX; C_FACE[3] = t.faceY;
   C_BG = t.bg; C_PANEL = t.panel; C_LINE = t.line; C_TEXT = t.text; C_DIM = t.dim; C_ACCENT = t.accent; C_SEL = t.sel;
 }
@@ -2283,7 +2283,7 @@ static void drawBrowser() {
   // The games on the left, the highlighted game's box art (on a 3D box) on the right.
   const float ART_W = detailsPanel ? roundf(listInnerW * 0.36f) : 0, gridW = detailsPanel ? listInnerW - ART_W - 16 : listInnerW;
   vector<string> emptyLines = empty.empty() ? vector<string>() : wrap(empty, gridW - 32, 17);
-  float head = LIST_HEAD;
+  float head = 0;  // (no line above the list: its column headings are inside it, at its top)
   const float footH = btnH() + 14;
   // the list takes all the height left (the screen, but for the margin)
   float listH = gfx::UI_H - 2 * SCREEN_MARGIN - (padY * 2 + tabRowH() + 10 + head + 12 + footH);
@@ -2294,7 +2294,7 @@ static void drawBrowser() {
   // One row: the title, tabs | search field, sort (the game count is in the list's heading, the
   // version in Settings -> App), so the list gets the room.
   gfx::rect(cx, cy + (tabH() - 26) / 2, 10, 26, col(C_ACCENT), 2);
-  textMid("SW2NES", cx + 22, cy, tabH(), 26, col(C_TEXT), gfx::BOLD);
+  { const bool it = gfx::italic; gfx::italic = false; textMid("SW2NES", cx + 22, cy, tabH(), 26, col(C_TEXT), gfx::BOLD); gfx::italic = it; }  // (the logo: upright)
   // Tabs | search field, sort
   drawTabBar(cx + titleW, cy, LIST_VIEWS, listView, focusArea == "tabs" ? (headIndex < 0 ? listView : headIndex < (int)LIST_VIEWS.size() ? headIndex : -1) : -1,
              [](int i) { if (i != listView) { listView = i; roms.clear(); orderRoms(); } focusArea = "tabs"; headIndex = -1; }, true);  // L and R (SL / SR) cycle them: their badges show it
@@ -2335,24 +2335,17 @@ static void drawBrowser() {
   const float inner = barW() + 8;  // the scroll bar, inside the list on its right
   const float timeC = cx + gridW - inner - 18 - metadataW / 2;
   const float playedC = timeC - metadataW, favC = playedC - metadataW;
-  if (!roms.empty()) {
-    const string gameHead = searchQuery.empty() ? "Game (" + std::to_string(roms.size()) + ")" : "Game (" + std::to_string(roms.size()) + " matching)";
-    gfx::text(gameHead, cx + 22, cy + 1, headText(), col(C_DIM), gfx::BOLD);
-    if (auto& ba = boxart::status(); ba.running) {  // a box art download: how far, beside the count
-      const int tot = ba.total.load(), dn = ba.done.load();
-      const string t = "Box art " + std::to_string(std::min(tot, dn + 1)) + " / " + std::to_string(tot);
-      const float hx = cx + 22 + gfx::textWidth(gameHead, headText(), gfx::BOLD) + 24, bx = hx + gfx::textWidth(t, headText(), gfx::BOLD) + 12, bw = 90;
-      gfx::text(t, hx, cy + 1, headText(), col(C_ACCENT), gfx::BOLD);
-      const float by = roundf(cy + 1 + headText() * 0.55f);
-      gfx::rect(bx, by, bw, 6, col(C_LINE), 3);
-      if (tot > 0) gfx::rect(bx, by, std::max(6.0f, bw * dn / tot), 6, col(C_ACCENT), 3);
-    }
-    if (!gridView) gfx::text("Time Played", timeC - gfx::textWidth("Time Played", headText(), gfx::BOLD) / 2, cy + 1, headText(), col(C_DIM), gfx::BOLD);
-    if (!gridView) gfx::text("Last Played", playedC - gfx::textWidth("Last Played", headText(), gfx::BOLD) / 2, cy + 1, headText(), col(C_DIM), gfx::BOLD);
-    if (!gridView) gfx::text("Favourite", favC - gfx::textWidth("Favourite", headText(), gfx::BOLD) / 2, cy + 1, headText(), col(C_DIM), gfx::BOLD);
-  }
-  cy += head;  // (kept with no games too: the window keeps its size)
+  cy += head;
   gfx::rect(cx, cy, gridW, listH, col(C_BG), 10, 1, col(C_LINE));
+  // the list's column headings, inside it at its top (the grid has no columns)
+  const float colHeadH = gridView || roms.empty() ? 0 : LIST_HEAD;
+  if (colHeadH > 0) {
+    const float hy = cy + 8;
+    gfx::text("Title", cx + 22, hy, headText(), col(C_DIM), gfx::BOLD);  // (over the games' names)
+    gfx::text("Time Played", timeC - gfx::textWidth("Time Played", headText(), gfx::BOLD) / 2, hy, headText(), col(C_DIM), gfx::BOLD);
+    gfx::text("Last Played", playedC - gfx::textWidth("Last Played", headText(), gfx::BOLD) / 2, hy, headText(), col(C_DIM), gfx::BOLD);
+    gfx::text("Favourite", favC - gfx::textWidth("Favourite", headText(), gfx::BOLD) / 2, hy, headText(), col(C_DIM), gfx::BOLD);
+  }
   if (roms.empty()) {
     float ly = cy + 16;
     for (auto& l : emptyLines) { glyphText(l, cx + 16, ly, 17, col(C_TEXT)); ly += 17 * 1.45f; }
@@ -2469,8 +2462,8 @@ static void drawBrowser() {
     gfx::clip((int)cx, (int)cy, (int)gridW, (int)listH);
     for (int i = 0; i < VIS && top + i < (int)roms.size(); i++) {
       const Rom& r = roms[top + i];
-      float ry = cy + 6 + i * ROW_H, rx = cx + 6, rw = gridW - 12 - inner;
-      bool active = (top + i == selected && focusArea == "list") || touchHolding(cx + 6, cy + 6 + i * ROW_H, gridW - 12 - inner, ROW_H);
+      float ry = cy + 6 + colHeadH + i * ROW_H, rx = cx + 6, rw = gridW - 12 - inner;
+      bool active = (top + i == selected && focusArea == "list") || touchHolding(cx + 6, cy + 6 + colHeadH + i * ROW_H, gridW - 12 - inner, ROW_H);
       if (active) { gfx::rect(rx, ry, rw, ROW_H, col(C_SEL), 6); gfx::rect(rx, ry, 4, ROW_H, col(C_ACCENT), 2); }
       else if (top + i == selected && focusArea == "buttons") gfx::rect(rx, ry, 4, ROW_H, col(C_DIM), 2);  // the game Play / Favourite act on
       {  // tap: select, then start; the Favourite column toggles the mark
@@ -2505,12 +2498,22 @@ static void drawBrowser() {
       }
     }
     gfx::noClip();
-    scrollbar(cx + gridW - barW() - 6, cy + 6, listH - 12, (int)roms.size(), VIS, top, &top);
+    scrollbar(cx + gridW - barW() - 6, cy + 6 + colHeadH, listH - 12 - colHeadH, (int)roms.size(), VIS, top, &top);
+  }
+  if (auto& ba = boxart::status(); ba.running) {  // a box art download: how far, a badge in the list's bottom right
+    const int tot = ba.total.load(), dn = ba.done.load();
+    const string t = "Box art " + std::to_string(std::min(tot, dn + 1)) + " / " + std::to_string(tot);
+    const float bw = 90, tw = gfx::textWidth(t, headText(), gfx::BOLD), w = 14 + tw + 12 + bw + 14, h = 34;
+    const float bx = roundf(cx + gridW - barW() - 18 - w), by = roundf(cy + listH - 10 - h);
+    gfx::rect(bx, by, w, h, col(C_PANEL, 0.96f), 8, 1, col(C_LINE));
+    textMid(t, bx + 14, by, h, headText(), col(C_ACCENT), gfx::BOLD);
+    const float rx = bx + 14 + tw + 12, ry = roundf(by + h / 2 - 3);
+    gfx::rect(rx, ry, bw, 6, col(C_LINE), 3);
+    if (tot > 0) gfx::rect(rx, ry, std::max(6.0f, bw * dn / tot), 6, col(C_ACCENT), 3);
   }
   if (detailsPanel) drawArtPanel(cx + gridW + 16, cy, ART_W, listH, selected < (int)roms.size() ? &roms[selected] : nullptr);
   cy += listH + 12;
   // Footer: button legends, right-aligned, each one place and one size
-  gfx::rect(cx, cy - 2, listInnerW, 1, col(C_LINE));
   const bool hasGame = selected < (int)roms.size();
   const vector<Legend> legends = {
       {"{A}", "Play", [] { if (selected < (int)roms.size()) pressFooter(0); }, false},

@@ -46,6 +46,9 @@ float textWidth(const std::string& s, float size, Font f = REGULAR);
 extern float borderScale;
 // A soft shadow behind all text, 1 screen pixel down and right (on by default): easier to read on any background.
 extern bool textShadow;
+// Text slanted as an italic (a 12 degree shear: the fonts have no italic); set by the theme (the Retro themes).
+// Letters inside button icons (badge, textCentered) stay upright.
+extern bool italic;
 void textInk(const std::string& s, float size, Font f, float& x0, float& y0, float& x1, float& y1);
 // A label with its ink centred on (mx, my) exactly: placed in whole screen pixels (no rounding through UI units).
 void textCentered(const std::string& s, float mx, float my, float size, Color c, Font f = REGULAR);
