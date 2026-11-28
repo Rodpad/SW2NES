@@ -53,7 +53,7 @@ enum { N_A = 1, N_B = 2, N_SELECT = 4, N_START = 8, N_UP = 16, N_DOWN = 32, N_LE
 
 // Colours: set by the theme (Settings -> App -> Theme).
 static uint32_t C_BG = 0x0b0d12, C_PANEL = 0x151924, C_LINE = 0x2a3142, C_TEXT = 0xeef1f7, C_DIM = 0x9aa3b5, C_ACCENT = 0xe4463b, C_SEL = 0x2b3550;
-struct Theme { const char* name; uint32_t bg, panel, line, text, dim, accent, sel; uint32_t faceA = 0, faceB = 0, faceX = 0, faceY = 0; float border = 1; bool italic = false; };  // border: how thick its borders are; italic: slanted text  // face: button-icon colours (0: the usual)
+struct Theme { const char* name; uint32_t bg, panel, line, text, dim, accent, sel; uint32_t faceA = 0, faceB = 0, faceX = 0, faceY = 0; float border = 1.6f; bool italic = false; uint32_t key = 0, keyInk = 0; bool faceInk = false; bool square = false; };  // square: square corners  // key / keyInk: every button icon's fill and letters (0: the usual); faceInk: the face colours are the letters' (on key)  // border: how thick its borders are (1.6: all themes); italic: slanted text  // face: button-icon colours (0: the usual)
 static const Theme THEMES[] = {
     {"Dark", 0x0b0d12, 0x151924, 0x2a3142, 0xeef1f7, 0x9aa3b5, 0xe4463b, 0x2b3550},
     {"Light", 0xe6e9ef, 0xf7f8fa, 0xc5ccd8, 0x1b1f27, 0x566072, 0xd2382c, 0xd9e0ec},
@@ -63,18 +63,46 @@ static const Theme THEMES[] = {
     {"Red", 0x160a0b, 0x221113, 0x47242a, 0xfaeeee, 0xd0a5a8, 0xff4d4d, 0x3d1c21},
     {"Green", 0x08130d, 0x0f1f15, 0x21402c, 0xeaf8ef, 0x9fcab0, 0x3ccf6e, 0x173a24},
     {"Orange", 0x140e08, 0x21170d, 0x47331d, 0xfcf3ea, 0xd3b79c, 0xff8c2a, 0x3d2a16},
-    // Retro: the grey of the 16-bit console's case (black borders), charcoal text, its purple buttons as the accent
-    {"Retro", 0x1f1e23, 0x34333a, 0x000000, 0xffffff, 0xdcdbe2, 0xb4a6ff, 0x4a4073, 0x6650c8, 0x6650c8, 0xb3a5ef, 0xb3a5ef, 1.6f, true},
-    // Retro Colour: the same greys, with the four coloured face buttons of the PAL and Japanese pads
-    {"Retro Colour", 0x1f1e23, 0x34333a, 0x000000, 0xffffff, 0xdcdbe2, 0xe0463e, 0x4a3a3c, 0xe0463e, 0xf2c230, 0x3f6fe0, 0x3caa55, 1.6f, true}};
+    // Retro Red: the 16-bit retro themes' greys, with the 8-bit pad's red A and B buttons as the accent
+    {"Retro Red", 0x1f1e23, 0x34333a, 0x000000, 0xffffff, 0xdcdbe2, 0xff8a7e, 0x4d2b2d, 0xc8242b, 0xc8242b, 0xc8242b, 0xc8242b, 3.0f, false, 0, 0, false, true}};
 static const int THEME_COUNT = (int)(sizeof THEMES / sizeof THEMES[0]);
+// The saved theme: by name ("themeName"); settings from before that hold a position in the list all the apps
+// shared then (Dark .. Orange, Retro Purple ("Retro" before), Retro Colour, Retro Red, Retro Station / Retro Blue). A
+// retro theme this app does not have (each console has its own): this app's first retro theme.
+static int themeFromSettings(const Json* name, const Json* index) {
+  static const char* OLD[] = {"Dark", "Light", "Black", "Blue", "Purple", "Red", "Green", "Orange", "Retro Purple", "Retro Colour", "Retro Red", "Retro Blue"};
+  string want;
+  if (name && name->isStr()) want = name->s;
+  else if (index && index->isNum() && index->n >= 0 && index->n < (int)(sizeof OLD / sizeof OLD[0])) want = OLD[(int)index->n];
+  if (want == "Retro" || want == "Retro Station") want = want == "Retro" ? "Retro Purple" : "Retro Blue";
+  if (want.empty()) return 0;
+  for (int i = 0; i < THEME_COUNT; i++) if (want == THEMES[i].name) return i;
+  if (want.rfind("Retro", 0) == 0) for (int i = 0; i < THEME_COUNT; i++) if (string(THEMES[i].name).rfind("Retro", 0) == 0) return i;
+  return 0;
+}
 static int themeIndex = 0;
 static uint32_t C_FACE[4] = {0, 0, 0, 0};  // A, B, X, Y icon colours of the theme (0: the usual)
+static uint32_t C_KEY = 0, C_KEYINK = 0; static bool C_FACEINK = false;  // the theme's button icon fill and letters (0: the usual)
+static float lumOf(uint32_t c) { return (0.299f * ((c >> 16) & 255) + 0.587f * ((c >> 8) & 255) + 0.114f * (c & 255)) / 255; }
+// A button icon's fill and letter colours: fi 0-3 the A, B, X, Y face buttons, -1 any other (L, R, +, -, the sticks).
+static gfx::Color keyFillOf(int fi, bool dim = false) {
+  const uint32_t f = fi >= 0 && C_FACE[fi] && !C_FACEINK ? C_FACE[fi] : C_KEY;
+  if (f) return gfx::rgb(f, dim ? 0.45f : 1.0f);
+  return gfx::rgb(dim ? C_LINE : C_DIM);
+}
+static gfx::Color keyInkOf(int fi) {
+  if (fi >= 0 && C_FACE[fi]) {
+    if (C_FACEINK) return gfx::rgb(C_FACE[fi]);
+    return lumOf(C_FACE[fi]) > 0.6f ? gfx::rgb(0x1e1b2a) : gfx::rgb(0xffffff);  // dark letters on a light icon, white on a dark one
+  }
+  return gfx::rgb(C_KEYINK ? C_KEYINK : C_PANEL);
+}
 static void applyTheme(int i) {
   themeIndex = i >= 0 && i < THEME_COUNT ? i : 0;
   const Theme& t = THEMES[themeIndex];
-  gfx::borderScale = t.border; gfx::italic = t.italic;
+  gfx::borderScale = t.border; gfx::italic = t.italic; gfx::squareCorners = t.square;
   C_FACE[0] = t.faceA; C_FACE[1] = t.faceB; C_FACE[2] = t.faceX; C_FACE[3] = t.faceY;
+  C_KEY = t.key; C_KEYINK = t.keyInk; C_FACEINK = t.faceInk;
   C_BG = t.bg; C_PANEL = t.panel; C_LINE = t.line; C_TEXT = t.text; C_DIM = t.dim; C_ACCENT = t.accent; C_SEL = t.sel;
 }
 static Color col(uint32_t c, float a = 1) { return gfx::rgb(c, a); }
@@ -392,7 +420,7 @@ static Json settingsJson(const GameVals& g) {
   j.set("romSortByView", sorts); j.set("playHistory", strings(playHistory));
   j.set("lastPlayedDates", lastPlayedDates);
   j.set("romDir", Json::string(romDir));
-  j.set("advanced", Json::boolean(showAdvanced)); j.set("debugLog", Json::boolean(debugLog)); j.set("touch", Json::boolean(touchControls)); j.set("menuButton", Json::number(menuButtonMode)); j.set("detailsPanel", Json::boolean(detailsPanel)); j.set("gridView", Json::boolean(gridView)); j.set("artAsked", Json::boolean(artAsked)); j.set("gameTitles", Json::boolean(gameTitles)); j.set("theme", Json::number(themeIndex));
+  j.set("advanced", Json::boolean(showAdvanced)); j.set("debugLog", Json::boolean(debugLog)); j.set("touch", Json::boolean(touchControls)); j.set("menuButton", Json::number(menuButtonMode)); j.set("detailsPanel", Json::boolean(detailsPanel)); j.set("gridView", Json::boolean(gridView)); j.set("artAsked", Json::boolean(artAsked)); j.set("gameTitles", Json::boolean(gameTitles)); j.set("theme", Json::number(themeIndex)); j.set("themeName", Json::string(THEMES[themeIndex].name));
   for (int pl = 0; pl < 2; pl++) { Json m = Json::array(); for (int i = 0; i < NPAD; i++) m.a.push_back(Json::number(padMap[pl][i])); j.set("padMap" + std::to_string(pl + 1), m); }
   {
     Json g = Json::object();
@@ -469,7 +497,7 @@ static void applySettingsJson(const Json& v) {
   if (const Json* d = v.get("gridView")) if (d->isBool()) gridView = d->b;
   if (const Json* d = v.get("artAsked")) if (d->isBool()) artAsked = d->b;
   if (const Json* d = v.get("gameTitles")) if (d->isBool()) gameTitles = d->b;
-  applyTheme(pick(v.get("theme"), THEME_COUNT, themeIndex));
+  applyTheme(themeFromSettings(v.get("themeName"), v.get("theme")));
   ROW_H = touchControls ? 72 : 40;
   if (const Json* r = v.get("romDir")) if (r->isStr() && !r->s.empty()) romDir = r->s;
   coreSel = pick(v.get("core"), CORES.size(), coreSel);
@@ -533,6 +561,7 @@ static bool naturalLess(const string& a0, const string& b0) {
   return a.size() - i < b.size() - j;
 }
 static string displayName(const string& name);  // the title or the file name, as the list shows it
+static u64 romAddedTimeCached(const string& path);
 static void orderRoms() {
   const int romSort = romSortByView[listView];
   string cur = selected < (int)roms.size() ? roms[selected].name : "";
@@ -564,6 +593,7 @@ static void orderRoms() {
       auto it = playedRank.find(r.name);
       return it == playedRank.end() ? playHistory.size() : it->second;
     };
+    if (romSort == AddedAsc || romSort == AddedDesc) for (Rom& r : list) r.added = romAddedTimeCached(r.dir + "/" + r.name);  // (read only for this sort)
     std::stable_sort(list.begin(), list.end(), [&](const Rom& a, const Rom& b) {
       if (romSort == PlayedAsc || romSort == PlayedDesc) {
         const size_t x = rank(a), y = rank(b);
@@ -668,6 +698,13 @@ static u64 romAddedTime(const string& path) {
       R_FAILED(fsFsGetFileTimeStampRaw(fs, translated, &stamp)) || !stamp.is_valid) return 0;
   return stamp.created;
 }
+// Each file's added time, read once (a file's time stamp is a slow call on a big folder).
+static std::map<string, u64> addedTimes;
+static u64 romAddedTimeCached(const string& path) {
+  auto it = addedTimes.find(path);
+  if (it == addedTimes.end()) it = addedTimes.emplace(path, romAddedTime(path)).first;
+  return it->second;
+}
 // Games in dir and its subfolders (hidden folders skipped; at most 6 levels; from the SD card's
 // root the app and system folders are left out).
 static void scanGames(const string& dir, int depth, vector<Rom>& found) {
@@ -680,7 +717,7 @@ static void scanGames(const string& dir, int depth, vector<Rom>& found) {
     bool isDir = e->d_type == DT_DIR;
     if (e->d_type == DT_UNKNOWN) { struct stat st; isDir = stat((dir + "/" + n).c_str(), &st) == 0 && S_ISDIR(st.st_mode); }
     if (isDir) subdirs.push_back(n);
-    else if (isRomExt(n) || hasExt(n, ".zip")) found.push_back(Rom{n, dir, romAddedTime(dir + "/" + n)});
+    else if (isRomExt(n) || hasExt(n, ".zip")) found.push_back(Rom{n, dir});  // (its added time: read only when sorting by it)
   }
   closedir(d);
   if (depth >= 6) return;
@@ -712,15 +749,46 @@ static boxart::System artSystem() {
   return s;
 }
 // Downloaded titles, by file name ("" when a game has none), read once from its details file.
+// All of them are kept in art/titles.json too, so a start reads one file instead of one a game (each a search of a
+// folder of hundreds of files). Rebuilt after a download run.
 static std::map<string, string> titleCache;
+static bool titleIndexLoaded = false, titleIndexDirty = false;
+static string titleIndexPath() { return string(DATA_DIR) + "/art/titles.json"; }
+// The details folder's file names, read once (one pass over the folder, not a search of it a game).
+static std::set<string> infoFiles; static bool infoFilesRead = false;
+static bool hasInfoFile(const string& name) {
+  const string p = boxart::infoPath(artSystem(), name);
+  const size_t slash = p.rfind('/');
+  if (!infoFilesRead) {
+    infoFilesRead = true; infoFiles.clear();
+    if (DIR* d = opendir(p.substr(0, slash).c_str())) { while (struct dirent* e = readdir(d)) infoFiles.insert(e->d_name); closedir(d); }
+  }
+  return infoFiles.count(p.substr(slash + 1)) > 0;
+}
+static void loadTitleIndex() {
+  titleIndexLoaded = true;
+  string t; Json j;
+  if (readText(titleIndexPath(), t) && Json::parse(t, j) && j.type == Json::OBJ)
+    for (auto& kv : j.o) if (kv.second.isStr()) titleCache.emplace(kv.first, kv.second.s);
+}
+static void saveTitleIndex() {
+  titleIndexDirty = false;
+  Json j = Json::object();
+  for (auto& kv : titleCache) j.o.emplace_back(kv.first, Json::string(kv.second));
+  writeText(titleIndexPath(), j.dump());
+}
+// After a download run: titles read again from the details files (and the index written anew).
+static void resetTitles() { titleCache.clear(); titleIndexLoaded = true; infoFilesRead = false; remove(titleIndexPath().c_str()); }
 static string displayName(const string& name) {
   if (gameTitles) {
+    if (!titleIndexLoaded) loadTitleIndex();
     auto it = titleCache.find(name);
     if (it == titleCache.end()) {
       string t, title; Json j;
-      if (readText(boxart::infoPath(artSystem(), name), t) && Json::parse(t, j) && j.type == Json::OBJ)
+      if (hasInfoFile(name) && readText(boxart::infoPath(artSystem(), name), t) && Json::parse(t, j) && j.type == Json::OBJ)
         if (const Json* v = j.get("title")) if (v->isStr()) title = v->s;
       it = titleCache.emplace(name, title).first;
+      titleIndexDirty = true;
     }
     if (!it->second.empty()) return it->second;
   }
@@ -1000,11 +1068,8 @@ static void scan() {
     vector<Rom> found;
     scanGames(dir, 0, found);
     std::stable_sort(found.begin(), found.end(), [](const Rom& a, const Rom& b) { return isRomExt(a.name) && !isRomExt(b.name); });
-    for (auto& r : found) {
-      bool dup = false;
-      for (auto& o : allRoms) if (lower(stripNes(o.name)) == lower(stripNes(r.name))) dup = true;
-      if (!dup) allRoms.push_back(r);
-    }
+    std::set<string> seen;
+    for (auto& r : found) if (seen.insert(lower(stripNes(r.name))).second) allRoms.push_back(r);
   }
   orderRoms();
   if (selected >= (int)roms.size()) selected = std::max(0, (int)roms.size() - 1);
@@ -1850,10 +1915,11 @@ static int settingsCatOf(const string& label) {
 }
 static vector<SettingItem> settingsFor(int cat, bool adv) {
   vector<SettingItem> items;
+  if (cat == 3) for (auto& it : settingsItems()) if (it.label == "Theme") items.push_back(it);  // App's first row
   if (cat == 3) items.push_back({"Advanced options", [] { return vector<string>{"Hidden", "Shown"}; }, [] { return showAdvanced ? 1 : 0; },
                                  [](int v) { showAdvanced = v != 0; rebuildSettings(); }});
   for (auto& it : settingsItems())
-    if ((adv || !contains(ADVANCED_SETTINGS, it.label)) && settingsCatOf(it.label) == cat) items.push_back(it);
+    if ((adv || !contains(ADVANCED_SETTINGS, it.label)) && settingsCatOf(it.label) == cat && it.label != "Theme") items.push_back(it);
   if (adv && cat == 3)
     items.push_back({"Reset all settings", [] { return vector<string>{"Press {A}", "Press {A} again to confirm"}; }, [] { return resetArmed ? 1 : 0; },
                      [](int v) { if (resetArmed) { resetArmed = false; resetAllSettings(); gfx::setHighRefresh(displayMode == 1); rebuildSettings(); settingsIndex = 0; settingsTop = 0; showToast("All settings reset to defaults"); } else resetArmed = true; }});
@@ -1997,9 +2063,9 @@ static const float SHOULDER_W = 28, SHOULDER_GAP = 10;
 static void drawShoulder(const char* label, float bx, float cy, bool left) {
   bx = roundf(bx);
   const float h = 22, w = SHOULDER_W, by = roundf(cy + (tabH() - h) / 2);
-  gfx::rect(bx, by, w, h, col(C_DIM), h / 2);                                  // round all round,
-  gfx::rect(left ? bx + w / 2 : bx, by, w / 2, h, col(C_DIM), 3);              // then squared on the inner side
-  inkMid(label, bx + w / 2 + (left ? 1.0f : -1.0f), by + h / 2, label[1] ? 12 : 14, col(C_PANEL), gfx::BOLD);
+  gfx::rect(bx, by, w, h, keyFillOf(-1), h / 2);                                // round all round,
+  gfx::rect(left ? bx + w / 2 : bx, by, w / 2, h, keyFillOf(-1), 3);            // then squared on the inner side
+  inkMid(label, bx + w / 2 + (left ? 1.0f : -1.0f), by + h / 2, label[1] ? 12 : 14, keyInkOf(-1), gfx::BOLD);
 }
 static void drawTabBar(float cx, float cy, const vector<string>& labels, int sel, int focusTab, std::function<void(int)> onTab = nullptr, bool caps = true, float fillW = 0) {  // focusTab: the tab the cursor is on, -1 none; fillW: equal tabs across this width
   cx = roundf(cx); cy = roundf(cy);  // whole pixels: a 1 px border at a fractional x can vanish
@@ -2030,9 +2096,7 @@ static bool drawTabBack(float rowX, float rowW, float cy, bool focus, std::funct
   const bool held = touchHolding(bx, cy - 6, BACK_W, tabH() + 12), lit = focus || held;
   gfx::rect(bx, cy, BACK_W, tabH(), held ? col(C_ACCENT, 0.35f) : focus ? col(C_SEL) : Color{0, 0, 0, 0}, BTN_RADIUS, 1, col(lit ? C_ACCENT : C_LINE));
   const float kw = 26, lw = gfx::textWidth("Back", TAB_TEXT), kx = roundf(bx + (BACK_W - (kw + 8 + lw)) / 2), ky = roundf(cy + (tabH() - kw) / 2);
-  const Color fill = C_FACE[1] ? gfx::rgb(C_FACE[1]) : col(C_DIM);  // (a theme's own B colour, as in the footer)
-  const float lum = C_FACE[1] ? (0.299f * ((C_FACE[1] >> 16) & 255) + 0.587f * ((C_FACE[1] >> 8) & 255) + 0.114f * (C_FACE[1] & 255)) / 255 : 0;
-  const Color ink = C_FACE[1] ? (lum > 0.6f ? gfx::rgb(0x1e1b2a) : gfx::rgb(0xffffff)) : col(C_PANEL);
+  const Color fill = keyFillOf(1), ink = keyInkOf(1);  // (the theme's B colours, as in the footer)
   if (singleJoyConConnected) { gfx::rect(kx, ky, kw, kw, fill, kw / 2); drawFaceGlyph(1, kx + (kw - glyphWidth(17)) / 2, ky + (kw - 17 * 1.25f) / 2, 17, ink); }
   else gfx::badge("B", kx, ky, kw, kw, kw / 2, fill, 15, ink, gfx::BOLD);
   textMid("Back", kx + kw + 8, cy, tabH(), TAB_TEXT, col(lit ? C_TEXT : C_DIM));
@@ -2074,9 +2138,12 @@ static float sortWidth() {
   return roundf(w + 40);
 }
 struct Legend { const char* key; string label; std::function<void()> tap; bool lit; };
+// A theme with very thick borders (Retro Red): extra room, in UI units, inside each footer button (borders are
+// drawn inward) and between them, so the borders do not crowd the labels or each other. 0 for the others.
+static float thickPad() { return gfx::borderScale > 2 ? roundf(2 * (gfx::borderScale - 1)) : 0; }
 static float legendWidth(const vector<string>& labels) {  // the widest of a legend's labels, with its badge
   float w = 0; for (auto& l : labels) w = std::max(w, gfx::textWidth(l, BTN_TEXT));
-  return roundf(30 + 10 + w + 28);
+  return roundf(30 + 10 + w + 28 + 2 * thickPad());
 }
 // The footer's buttons, left to right, by their action (pressFooter): Play 0, Favourite 1, Search 2, Refresh 4 (Y),
 // Settings 3 (X), Sort 7 (the next sort order, as the header's), View 9 (the four views in turn), Exit 5.
@@ -2084,7 +2151,7 @@ static const int FOOT_IDS[8] = {0, 1, 2, 4, 3, 7, 9, 5};  // (Y Refresh, X Setti
 static const int FOOT_N = 8, FOOT_EXIT = 7;  // (Exit's place)
 static vector<float> footerWidths(float room = 1e9f) {  // every footer button one width: the longest label's, or less to fit the row
   const float natural = legendWidth({"Play", "Favourite", "Search", "Settings", "Refresh", "Sort", "View", "Exit", "Confirm exit"});
-  return vector<float>(FOOT_N, std::min(natural, floorf((room - (FOOT_N + 1) * 6) / FOOT_N)));
+  return vector<float>(FOOT_N, std::min(natural, floorf((room - (FOOT_N + 1) * (6 + thickPad())) / FOOT_N)));
 }
 // The four views in turn (View, the right stick press): list or grid, each with or without the details panel.
 static void cycleView() {
@@ -2350,7 +2417,7 @@ static void drawBrowser() {
     float ly = cy + 16;
     for (auto& l : emptyLines) { glyphText(l, cx + 16, ly, 17, col(C_TEXT)); ly += 17 * 1.45f; }
   } else if (gridView) {  // the grid: a cover and a title for each game
-    const float gap = 14, areaX = cx + 12, areaW = gridW - 24 - inner, areaY = cy + 12, areaH = listH - 24;
+    const float gap = 14, areaX = cx + 12 + thickPad(), areaW = gridW - 24 - 2 * thickPad() - inner, areaY = cy + 12 + thickPad(), areaH = listH - 24 - 2 * thickPad();  // (room for a thick highlight border)
     const float target = GRID_ASPECT >= 1 ? 190.0f : 150.0f;  // about this wide
     const int cols = std::max(2, (int)((areaW + gap) / (target + gap)));
     const float tileW = floorf((areaW - (cols - 1) * gap) / cols), coverH = roundf(tileW / GRID_ASPECT), capH = 28, tileH = coverH + capH + gap;
@@ -2398,17 +2465,24 @@ static void drawBrowser() {
       gridDragV = gridDragV * 0.5f - dy * 0.5f;
     });
     // inside the panel's border, clear of its rounded corners: no cover is ever drawn over it or outside
-    gfx::clip((int)cx + 2, (int)cy + 8, (int)gridW - 4, (int)listH - 16);
+    gfx::clip((int)cx + 2, (int)cy + 4, (int)gridW - 4, (int)listH - 8);
     for (int r = 0; r <= rows + 1; r++) for (int c = 0; c < cols; c++) {  // (and the rows cut off at the panel's edges)
       const int idx = (topRow + r) * cols + c;
       if (idx >= n) break;
       const float tx = roundf(areaX + c * (tileW + gap)), ty = roundf((areaY + r * tileH - scrollFrac) * UI_SCALE) / UI_SCALE;
       const Rom& rom = roms[idx];
       const bool sel = idx == selected && (focusArea == "list" || focusArea == "buttons"), held = touchHolding(tx, ty, tileW, coverH + capH);
-      if ((sel && focusArea == "list") || held) gfx::rect(tx - 6, ty - 6, tileW + 12, coverH + capH + 8, col(C_SEL), 8, 2, col(C_ACCENT));
-      else if (sel) gfx::rect(tx - 6, ty - 6, tileW + 12, coverH + capH + 8, Color{0, 0, 0, 0}, 8, 1, col(C_DIM));  // the game Play / Favourite act on
+      gfx::Image* const im = coverFor(rom.name);
+      {  // the highlight: hugging the cover's top (a cover shorter than its slot leaves no band above it), with room
+         // for a thick border (drawn inward) so the cover never covers it
+        float fTop = ty;
+        if (im) { const float ia = (float)gfx::imageWidth(im) / gfx::imageHeight(im); fTop = roundf(ty + coverH - std::min(coverH, tileW / ia)); }
+        const float m = 6 + thickPad(), fy = fTop - m, fh = ty + coverH + capH + 2 + thickPad() - fy;
+        if ((sel && focusArea == "list") || held) gfx::rect(tx - m, fy, tileW + 2 * m, fh, col(C_SEL), 8, 2, col(C_ACCENT));
+        else if (sel) gfx::rect(tx - m, fy, tileW + 2 * m, fh, Color{0, 0, 0, 0}, 8, 1, col(C_DIM));  // the game Play / Favourite act on
+      }
       const string title = displayName(rom.name);
-      if (gfx::Image* im = coverFor(rom.name)) {  // fitted in its slot, standing on the slot's bottom
+      if (im) {  // fitted in its slot, standing on the slot's bottom
         const float ia = (float)gfx::imageWidth(im) / gfx::imageHeight(im);
         float dw = tileW, dh = tileW / ia;
         if (dh > coverH) { dh = coverH; dw = coverH * ia; }
@@ -2425,19 +2499,19 @@ static void drawBrowser() {
       if (contains(favourites, rom.name)) {  // a favourite: a star in the corner
         gfx::imageDraw(starImage(), tx + tileW - 30, ty + 4, 26, 26);
       }
-      {  // the title: a long one under the highlighted cover scrolls (after 2 s), as in the list
+      {  // the title: a long one under the highlighted cover scrolls (after 1 s), as in the list
         const float cw = gfx::textWidth(title, rowSmall());
         static int capIdx = -1; static double capSince = 0;
         const bool lit = sel && focusArea == "list";
         if (lit && idx != capIdx) { capIdx = idx; capSince = nowMs(); }
         if (lit && cw > tileW) {
-          const double over = cw - tileW, speed = 40, cycle = 2.0 + over / speed + 1.5;
+          const double over = cw - tileW, speed = 40, cycle = 1.0 + over / speed + 1.5;
           const double at = fmod((nowMs() - capSince) / 1000.0, cycle);
-          const float off = at < 2.0 ? 0 : (float)std::min(over, (at - 2.0) * speed);
+          const float off = at < 1.0 ? 0 : (float)std::min(over, (at - 1.0) * speed);
           gfx::clip((int)tx, (int)(ty + coverH), (int)tileW, (int)capH + 4);
           textMid(title, tx - off, ty + coverH + 2, capH, rowSmall(), col(C_TEXT));
           gfx::noClip();
-          gfx::clip((int)cx + 2, (int)cy + 8, (int)gridW - 4, (int)listH - 16);  // (the grid's own clip again)
+          gfx::clip((int)cx + 2, (int)cy + 4, (int)gridW - 4, (int)listH - 8);  // (the grid's own clip again)
         } else {
           const string cap = gfx::ellipsize(title, tileW, rowSmall());
           textMid(cap, tx + (tileW - gfx::textWidth(cap, rowSmall())) / 2, ty + coverH + 2, capH, rowSmall(), col(sel ? C_TEXT : C_DIM));
@@ -2480,16 +2554,16 @@ static void drawBrowser() {
       }
       const string& date = lastPlayedLabel(r.name);
       if (!date.empty()) textMid(date, playedC - gfx::textWidth(date, rowSmall()) / 2, ry, ROW_H, rowSmall(), col(C_DIM));
-      {  // the title: a long one on the highlighted row scrolls (after 2 s) to show the rest
+      {  // the title: a long one on the highlighted row scrolls (after 1 s) to show the rest
         const string title = displayName(r.name);
         const float avail = favC - metadataW / 2 - rx - 28, tw = gfx::textWidth(title, rowText());
         static int marqueeRow = -1; static double marqueeSince = 0;
         if (active && top + i != marqueeRow) { marqueeRow = top + i; marqueeSince = nowMs(); }
         if (active && tw > avail) {
           const double over = tw - avail, speed = 40;  // UI units per second
-          const double cycle = 2.0 + over / speed + 1.5;  // wait, scroll, rest at the end
+          const double cycle = 1.0 + over / speed + 1.5;  // wait, scroll, rest at the end
           const double at = fmod((nowMs() - marqueeSince) / 1000.0, cycle);
-          const float off = at < 2.0 ? 0 : (float)std::min(over, (at - 2.0) * speed);
+          const float off = at < 1.0 ? 0 : (float)std::min(over, (at - 1.0) * speed);
           gfx::clip((int)(rx + 16), (int)ry, (int)avail, (int)ROW_H);
           textMid(title, rx + 16 - off, ry, ROW_H, rowText(), col(C_TEXT));
           gfx::noClip();
@@ -2527,7 +2601,7 @@ static void drawBrowser() {
   // Each legend is as wide as its longest label (a label change never moves anything); the same
   // space before, between and after them, so the row is evenly spaced and centred on the game list.
   float sumW = 0; for (float w : fw) sumW += w;
-  const float g = std::max(4.0f, (listInnerW - sumW) / (legends.size() + 1));
+  const float g = std::max(4.0f + thickPad(), (listInnerW - sumW) / (legends.size() + 1));
   const float ly = roundf(cy + (footH - btnH()) / 2 + 2);
   float lx0 = cx + g;
   for (size_t i = 0; i < legends.size(); i++) {
@@ -2538,15 +2612,13 @@ static void drawBrowser() {
     const bool focus = focusArea == "buttons" && btnIndex == (int)i, flash = (footFlash == FOOT_IDS[i] && nowMs() < footFlashUntil) || touchHolding(lx - g / 2, ly - 4, bw + g, btnH() + 8);
     gfx::rect(lx, ly, bw, btnH(), flash ? col(C_ACCENT) : focus || L.lit ? col(C_SEL) : col(C_BG), BTN_RADIUS, focus ? 2 : 1,
               col(flash || focus || L.lit ? C_ACCENT : C_LINE));
-    const string label = gfx::ellipsize(L.label, bw - 30 - 10 - 16, BTN_TEXT);  // (fits: the buttons shrink to fit the row)
+    const string label = gfx::ellipsize(L.label, bw - 30 - 10 - 16 - 2 * thickPad(), BTN_TEXT);  // (fits: the buttons shrink to fit the row)
     const float kw = 30, kx = lx + (bw - (kw + 10 + gfx::textWidth(label, BTN_TEXT))) / 2, ky = ly + (btnH() - kw) / 2;
     const string k = L.key;
     // the theme's colour for this face button (Retro Colour), if it has one
     const int fi = k == "{A}" ? 0 : k == "{B}" ? 1 : k == "{X}" ? 2 : k == "{Y}" ? 3 : -1;
-    const uint32_t face = fi >= 0 ? C_FACE[fi] : 0;
-    const float faceLum = face ? (0.299f * ((face >> 16) & 255) + 0.587f * ((face >> 8) & 255) + 0.114f * (face & 255)) / 255 : 0;
-    const gfx::Color keyInk = face ? (faceLum > 0.6f ? gfx::rgb(0x1e1b2a) : gfx::rgb(0xffffff)) : col(C_PANEL);  // dark letters on a light icon, white on a dark one
-    const Color keyFill = face ? (dim ? gfx::rgb(face, 0.45f) : gfx::rgb(face)) : col(dim ? C_LINE : C_DIM);
+    const gfx::Color keyInk = keyInkOf(fi);
+    const Color keyFill = keyFillOf(fi, dim);
     if (k[0] == '{' && singleJoyConConnected) {
       gfx::rect(kx, ky, kw, kw, keyFill, kw / 2);
       drawFaceGlyph(glyphToken(k, 0), kx + (kw - glyphWidth(20)) / 2, ky + (kw - 20 * 1.25f) / 2, 20, keyInk);
@@ -3318,7 +3390,7 @@ static void maybeAskArt() {
   if (artAsked || allRoms.empty() || boxart::status().running) return;
   const boxart::System sys = artSystem();
   bool missing = false;
-  for (const Rom& r : allRoms) if (!exists(boxart::infoPath(sys, r.name))) { missing = true; break; }
+  for (const Rom& r : allRoms) if (!hasInfoFile(r.name)) { missing = true; break; }  // (from the folder's listing)
   if (!missing || !internetConnected()) return;
   artAsked = true; saveSettings();
   showQuestion("Some of your games have no box art or description yet.\n\nDownload them now from ScreenScraper? It needs an internet connection and takes a few seconds a game. You can also do it later in Settings > App.",
@@ -3418,8 +3490,9 @@ int main(int argc, char** argv) {
       auto& b = boxart::status();
       if (b.running && b.found != artSeen) { artSeen = b.found; clearArtCache(); staleCovers(false); }
       if (mode == "browser" && artCheckPending) { artCheckPending = false; maybeAskArt(); }
-      if (artWasRunning && !b.running) { clearArtCache(); staleCovers(true); titleCache.clear(); orderRoms(); artSeen = 0; showToast(b.message, 4000); }
+      if (artWasRunning && !b.running) { clearArtCache(); staleCovers(true); resetTitles(); orderRoms(); artSeen = 0; showToast(b.message, 4000); }
       artWasRunning = b.running;
+      if (titleIndexDirty && !b.running) saveTitleIndex();  // (new titles read: kept for the next start)
     }
     if (toastUntil && t > toastUntil) toastUntil = 0;
     if (hintUntil && t > hintUntil) hintUntil = 0;

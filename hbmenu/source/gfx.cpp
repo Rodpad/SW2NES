@@ -241,13 +241,13 @@ static void textAtPx(const std::string& s, float pen, float baseline, int px, Co
   drawTextVerts(c);
 }
 void textCentered(const std::string& s, float mx, float my, float size, Color c, Font f) {
-  struct Upright { bool was = italic; Upright() { italic = false; } ~Upright() { italic = was; } } upright;  // (a button icon's letters)
+  struct Upright { bool was = italic, sh = textShadow; Upright() { italic = false; textShadow = false; } ~Upright() { italic = was; textShadow = sh; } } upright;  // (a button icon's letters: upright, no shadow)
   const int px = (int)(size * UI_SCALE + 0.5f);
   float x0, y0, x1, y1; inkPx(s, px, f, x0, y0, x1, y1);
   textAtPx(s, roundf(mx * UI_SCALE - (x0 + x1) / 2), roundf(my * UI_SCALE - (y0 + y1) / 2), px, c, f);
 }
 void badge(const std::string& label, float x, float y, float w, float h, float radius, Color fill, float size, Color ink, Font f, float border, Color borderColor) {
-  struct Upright { bool was = italic; Upright() { italic = false; } ~Upright() { italic = was; } } upright;  // (a button icon's letters)
+  struct Upright { bool was = italic, sh = textShadow; Upright() { italic = false; textShadow = false; } ~Upright() { italic = was; textShadow = sh; } } upright;  // (a button icon's letters: upright, no shadow)
   const int px = (int)(size * UI_SCALE + 0.5f);
   float x0, y0, x1, y1; inkPx(label, px, f, x0, y0, x1, y1);
   const int iw = (int)(x1 - x0), ih = (int)(y1 - y0);
@@ -291,6 +291,7 @@ static void quad(float x, float y, float w, float h, float u0, float v0, float u
 }
 
 float borderScale = 1;
+bool squareCorners = false;
 void rect(float x, float y, float w, float h, Color fill, float radius, float border, Color bc) {
   if (w <= 0 || h <= 0) return;
   // To whole screen pixels (the UI is drawn 1.25x): edges and borders that land between pixels
@@ -302,6 +303,7 @@ void rect(float x, float y, float w, float h, Color fill, float radius, float bo
   glUseProgram(rectProg); setScreen(rScreen);
   glUniform4f(rRect, x, y, w, h);
   float r = radius; if (r > w / 2) r = w / 2; if (r > h / 2) r = h / 2;
+  if (squareCorners && r < std::min(w, h) / 2 - 0.5f) r = 0;  // (a theme's square corners; circles and pills stay round)
   glUniform1f(rRadius, r); glUniform1f(rBorder, border);
   glUniform4f(rFill, fill.r, fill.g, fill.b, fill.a);
   glUniform4f(rBorderColor, bc.r, bc.g, bc.b, bc.a);

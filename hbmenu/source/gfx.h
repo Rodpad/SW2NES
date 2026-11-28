@@ -44,6 +44,7 @@ float textWidth(const std::string& s, float size, Font f = REGULAR);
 // it: for centring short labels exactly (a capital L's box has empty room on its right, and capitals none below).
 // Borders (the border of rect) this much thicker: set by the theme (the Retro themes draw theirs bolder).
 extern float borderScale;
+extern bool squareCorners;  // a theme's square corners (circles and pill shapes stay round)
 // A soft shadow behind all text, 1 screen pixel down and right (on by default): easier to read on any background.
 extern bool textShadow;
 // Text slanted as an italic (a 12 degree shear: the fonts have no italic); set by the theme (the Retro themes).
